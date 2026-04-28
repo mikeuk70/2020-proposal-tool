@@ -5,7 +5,7 @@ Hosted Flask app for LawLiss / 20.20
 
 import os, json, uuid, threading, queue, time, base64, re, copy, zipfile, tempfile, shutil
 import anthropic
-from flask import Flask, request, jsonify, send_file, Response, render_template
+from flask import Flask, request, jsonify, send_file, Response
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 20 * 1024 * 1024  # 20MB max upload
@@ -668,9 +668,517 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
 
 
 # ── ROUTES ────────────────────────────────────────────────────────────────────
+INDEX_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>20.20 Proposal Generator</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --nv:#1B2340;--gd:#C9A84C;--rd:#E97132;
+  --bg:#F5F4F1;--white:#fff;--bd:#E0DED8;
+  --tx:#1A1A1A;--tx2:#666;--r:8px;--rl:14px
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;
+  background:var(--bg);color:var(--tx);min-height:100vh}
+
+/* NAV */
+nav{background:var(--nv);padding:0 2rem;display:flex;align-items:center;
+  justify-content:space-between;height:54px;position:sticky;top:0;z-index:100}
+.logo{display:flex;align-items:center;gap:10px}
+.logo-mark{font-size:13px;font-weight:700;color:var(--white);line-height:1.1;letter-spacing:-0.5px}
+.logo-mark span{color:var(--gd)}
+.logo-name{font-size:13px;color:rgba(255,255,255,.55);border-left:1px solid rgba(255,255,255,.2);padding-left:10px}
+.nav-status{font-size:12px;color:rgba(255,255,255,.45)}
+
+/* LAYOUT */
+.page{max-width:860px;margin:0 auto;padding:2rem 1.5rem 4rem}
+
+/* PANELS */
+.panel{background:var(--white);border-radius:var(--rl);margin-bottom:1.25rem;overflow:hidden;
+  box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.panel-head{padding:1rem 1.25rem;border-bottom:1px solid var(--bd);display:flex;
+  align-items:center;justify-content:space-between}
+.panel-head h2{font-size:15px;font-weight:600;color:var(--nv)}
+.panel-head .step-badge{font-size:10px;font-weight:700;text-transform:uppercase;
+  letter-spacing:.08em;color:var(--tx2);background:var(--bg);
+  padding:3px 10px;border-radius:20px}
+.panel-body{padding:1.25rem}
+
+/* FORM */
+.tab-row{display:flex;border:1px solid var(--bd);border-radius:var(--r);overflow:hidden;margin-bottom:1rem}
+.tab-btn{flex:1;padding:8px;font-size:13px;font-weight:600;border:none;cursor:pointer;
+  font-family:inherit;transition:all .15s}
+.tab-btn.active{background:var(--nv);color:var(--white)}
+.tab-btn.inactive{background:var(--bg);color:var(--tx2);border-left:1px solid var(--bd)}
+.field-label{display:block;font-size:12px;font-weight:600;margin-bottom:5px;color:var(--tx2)}
+input[type=file]{display:block;width:100%;font-size:13px;padding:8px;
+  border:1px solid var(--bd);border-radius:var(--r);background:var(--bg);cursor:pointer;font-family:inherit}
+textarea{width:100%;font-size:13px;padding:10px;border:1px solid var(--bd);
+  border-radius:var(--r);font-family:inherit;resize:vertical;min-height:160px;
+  line-height:1.5;outline:none;transition:border-color .15s}
+textarea:focus{border-color:var(--nv)}
+
+/* BUTTONS */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:9px 20px;border:none;
+  border-radius:var(--r);font-size:13px;font-weight:600;cursor:pointer;
+  font-family:inherit;transition:opacity .15s}
+.btn:hover{opacity:.88}
+.btn-primary{background:var(--nv);color:var(--white)}
+.btn-gold{background:var(--gd);color:var(--nv)}
+.btn-outline{background:transparent;border:1px solid var(--bd);color:var(--tx)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+
+/* PROGRESS */
+.progress-wrap{margin:1rem 0}
+.progress-bar-bg{height:5px;background:var(--bd);border-radius:3px;overflow:hidden;margin-bottom:.5rem}
+.progress-bar-fill{height:100%;background:var(--nv);border-radius:3px;transition:width .5s}
+.progress-msg{font-size:12px;color:var(--tx2);text-align:center;min-height:1.2em}
+
+/* SECTIONS */
+.section-card{border:1px solid var(--bd);border-radius:var(--r);overflow:hidden;margin-bottom:10px}
+.section-head{display:flex;align-items:center;justify-content:space-between;
+  padding:.6rem 1rem;background:var(--nv);cursor:pointer;user-select:none}
+.section-head-title{font-size:13px;font-weight:600;color:var(--white)}
+.section-copy-btn{font-size:11px;color:rgba(255,255,255,.55);padding:2px 8px;
+  background:rgba(255,255,255,.1);border:none;border-radius:4px;cursor:pointer;font-family:inherit}
+.section-copy-btn:hover{background:rgba(255,255,255,.2);color:var(--white)}
+.section-body{padding:.75rem 1rem;background:var(--white)}
+.section-body textarea{min-height:80px;border:none;padding:0;background:transparent;
+  font-size:13px;line-height:1.7;resize:vertical;outline:none;color:var(--tx)}
+
+/* META */
+.meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:1rem}
+.meta-card{background:var(--bg);border:1px solid var(--bd);border-radius:var(--r);padding:.75rem 1rem}
+.meta-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+  color:var(--tx2);margin-bottom:3px}
+.meta-value{font-size:13px;color:var(--tx)}
+.intel-card{background:var(--bg);border:1px solid var(--bd);border-radius:var(--r);padding:1rem}
+.intel-row{padding:.5rem 0;border-bottom:1px solid var(--bd);font-size:13px;line-height:1.5}
+.intel-row:last-child{border:none}
+.intel-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+  color:var(--gd);margin-bottom:2px}
+
+/* ACTIONS BAR */
+.actions-bar{display:flex;gap:8px;flex-wrap:wrap;padding-top:1rem;
+  border-top:1px solid var(--bd);margin-top:1rem}
+
+/* HIDDEN */
+.hidden{display:none}
+
+/* PILL */
+.pill{display:inline-block;font-size:10px;font-weight:700;text-transform:uppercase;
+  letter-spacing:.06em;padding:2px 10px;border-radius:20px}
+.pill-running{background:#EAF3DE;color:#3B6D11}
+.pill-done{background:#E6F1FB;color:#185FA5}
+.pill-error{background:#FCEBEB;color:#A32D2D}
+
+/* ERROR */
+.error-box{background:#FCEBEB;border:1px solid #F09595;border-radius:var(--r);
+  padding:.75rem 1rem;font-size:13px;color:#A32D2D;margin-top:.75rem}
+
+@media(max-width:600px){
+  .meta-grid{grid-template-columns:1fr}
+  .page{padding:1rem .75rem 3rem}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="logo">
+    <div class="logo-mark">20<br><span>20</span></div>
+    <div class="logo-name">Proposal Generator</div>
+  </div>
+  <div class="nav-status" id="nav-status"></div>
+</nav>
+
+<div class="page">
+
+  <!-- STEP 1: INPUT -->
+  <div class="panel" id="panel-input">
+    <div class="panel-head">
+      <h2>Add the brief</h2>
+      <span class="step-badge">Step 1</span>
+    </div>
+    <div class="panel-body">
+      <p style="font-size:13px;color:var(--tx2);margin-bottom:1rem;line-height:1.5">
+        Upload a PDF brief or paste the text. The tool reads it, researches the client,
+        writes the proposal sections, and builds a branded PowerPoint — ready to review and download.
+      </p>
+
+      <div class="tab-row">
+        <button class="tab-btn active" id="tab-pdf" onclick="switchTab('pdf')">↑ Upload PDF</button>
+        <button class="tab-btn inactive" id="tab-text" onclick="switchTab('text')">Paste text</button>
+      </div>
+
+      <div id="panel-pdf">
+        <label class="field-label">Select PDF brief</label>
+        <input type="file" id="brief-pdf" accept=".pdf">
+        <p style="font-size:11px;color:var(--tx2);margin-top:.4rem">
+          Presentations, ITTs, emails saved as PDF — anything works
+        </p>
+      </div>
+
+      <div id="panel-text" class="hidden">
+        <label class="field-label">Paste brief text</label>
+        <textarea id="brief-text" placeholder="Paste the brief here — email, copied PDF text, ITT, meeting notes..."></textarea>
+      </div>
+
+      <div id="submit-error" class="error-box hidden"></div>
+
+      <div style="margin-top:1rem">
+        <button class="btn btn-primary" id="submit-btn" onclick="submitBrief()">
+          Generate proposal →
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- STEP 2: PROGRESS -->
+  <div class="panel hidden" id="panel-progress">
+    <div class="panel-head">
+      <h2>Generating</h2>
+      <span class="pill pill-running" id="status-pill">Running</span>
+    </div>
+    <div class="panel-body">
+      <div class="progress-wrap">
+        <div class="progress-bar-bg"><div class="progress-bar-fill" id="prog-bar" style="width:0%"></div></div>
+        <div class="progress-msg" id="prog-msg">Starting...</div>
+      </div>
+      <p style="font-size:12px;color:var(--tx2);line-height:1.5">
+        Writing each section with a short pause between calls to stay within API rate limits.
+        This takes around 90 seconds. Sections appear below as they complete.
+      </p>
+    </div>
+  </div>
+
+  <!-- STEP 3: SECTIONS (appear during generation) -->
+  <div class="panel hidden" id="panel-sections">
+    <div class="panel-head">
+      <h2>Proposal sections</h2>
+      <span class="step-badge">Review and edit</span>
+    </div>
+    <div class="panel-body">
+      <p style="font-size:12px;color:var(--tx2);margin-bottom:1rem">
+        Each section is editable. Make any changes before downloading the PowerPoint.
+      </p>
+      <div id="sections-list"></div>
+    </div>
+  </div>
+
+  <!-- STEP 4: CLIENT INTEL -->
+  <div class="panel hidden" id="panel-intel">
+    <div class="panel-head">
+      <h2>Client intelligence</h2>
+      <span class="step-badge">Verify before pitch</span>
+    </div>
+    <div class="panel-body" id="intel-body"></div>
+  </div>
+
+  <!-- STEP 5: ACTIONS -->
+  <div class="panel hidden" id="panel-actions">
+    <div class="panel-head">
+      <h2>Download</h2>
+      <span class="step-badge">Step 2</span>
+    </div>
+    <div class="panel-body">
+      <p style="font-size:13px;color:var(--tx2);margin-bottom:1rem;line-height:1.5">
+        The PowerPoint uses the 20.20 branded template with Filson Pro fonts, correct layouts and your client's colour.
+        Image placeholders include specific direction for the creative team.
+        Fees show [FEE: TBC] — apply the rate card before sending.
+      </p>
+      <div class="actions-bar">
+        <button class="btn btn-gold" id="download-btn" onclick="downloadPPTX()">
+          ↓ Download PowerPoint
+        </button>
+        <button class="btn btn-outline" onclick="rebuildAndDownload()">
+          ↓ Rebuild from edited sections
+        </button>
+        <button class="btn btn-outline" onclick="resetAll()" style="margin-left:auto">
+          New brief
+        </button>
+      </div>
+      <div id="rebuild-status" style="font-size:12px;color:var(--tx2);margin-top:.5rem;display:none"></div>
+    </div>
+  </div>
+
+</div><!-- .page -->
+
+<script>
+let activeTab = 'pdf';
+let currentJobId = null;
+let pollInterval = null;
+let lastProgressLen = 0;
+let currentMeta = {};
+let jobDone = false;
+
+function switchTab(t) {
+  activeTab = t;
+  document.getElementById('panel-pdf').classList.toggle('hidden', t !== 'pdf');
+  document.getElementById('panel-text').classList.toggle('hidden', t !== 'text');
+  document.getElementById('tab-pdf').className = 'tab-btn ' + (t === 'pdf' ? 'active' : 'inactive');
+  document.getElementById('tab-text').className = 'tab-btn ' + (t === 'text' ? 'active' : 'inactive');
+}
+
+async function submitBrief() {
+  var errEl = document.getElementById('submit-error');
+  errEl.classList.add('hidden');
+
+  var fd = new FormData();
+  if (activeTab === 'pdf') {
+    var f = document.getElementById('brief-pdf').files[0];
+    if (!f) { errEl.textContent = 'Please select a PDF file first.'; errEl.classList.remove('hidden'); return; }
+    fd.append('brief_pdf', f);
+  } else {
+    var txt = document.getElementById('brief-text').value.trim();
+    if (!txt) { errEl.textContent = 'Please paste the brief text.'; errEl.classList.remove('hidden'); return; }
+    fd.append('brief_text', txt);
+  }
+
+  document.getElementById('submit-btn').disabled = true;
+  document.getElementById('submit-btn').textContent = 'Submitting...';
+
+  try {
+    var resp = await fetch('/submit', { method: 'POST', body: fd });
+    var data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    currentJobId = data.job_id;
+    showProgress();
+    pollInterval = setInterval(pollStatus, 2000);
+  } catch(e) {
+    errEl.textContent = e.message;
+    errEl.classList.remove('hidden');
+    document.getElementById('submit-btn').disabled = false;
+    document.getElementById('submit-btn').textContent = 'Generate proposal →';
+  }
+}
+
+function showProgress() {
+  document.getElementById('panel-progress').classList.remove('hidden');
+  document.getElementById('nav-status').textContent = 'Generating…';
+}
+
+async function pollStatus() {
+  if (!currentJobId) return;
+  try {
+    var resp = await fetch('/status/' + currentJobId);
+    var data = await resp.json();
+
+    // Update progress
+    if (data.progress && data.progress.length > lastProgressLen) {
+      var latest = data.progress[data.progress.length - 1];
+      document.getElementById('prog-msg').textContent = latest.msg;
+      if (latest.pct != null) {
+        document.getElementById('prog-bar').style.width = latest.pct + '%';
+      }
+      lastProgressLen = data.progress.length;
+    }
+
+    // Show sections as they arrive
+    if (data.sections && data.sections.length > 0) {
+      document.getElementById('panel-sections').classList.remove('hidden');
+      renderSections(data.sections);
+    }
+
+    // Store meta
+    if (data.meta && data.meta.client) {
+      currentMeta = data.meta;
+    }
+
+    // Done
+    if (data.status === 'done' || data.status === 'error') {
+      clearInterval(pollInterval);
+      jobDone = true;
+      document.getElementById('prog-bar').style.width = '100%';
+
+      if (data.status === 'done') {
+        document.getElementById('status-pill').textContent = 'Complete';
+        document.getElementById('status-pill').className = 'pill pill-done';
+        document.getElementById('nav-status').textContent = data.pptx_ready ? 'Ready to download' : 'Sections ready';
+        document.getElementById('prog-msg').textContent = data.pptx_ready ? 'Complete' : (data.pptx_error || 'Sections complete');
+      } else {
+        document.getElementById('status-pill').textContent = 'Error';
+        document.getElementById('status-pill').className = 'pill pill-error';
+        document.getElementById('nav-status').textContent = 'Error';
+        document.getElementById('prog-msg').textContent = data.error || 'Unknown error';
+      }
+
+      // Show intel if available
+      if (data.intel && Object.keys(data.intel).length) {
+        renderIntel(data.intel, data.meta);
+      }
+      // Always show actions panel if we have sections
+      if (data.sections && data.sections.length > 0) {
+        var actionsPanel = document.getElementById('panel-actions');
+        actionsPanel.classList.remove('hidden');
+        // Update download button based on pptx status
+        var dlBtn = document.getElementById('download-btn');
+        if (data.pptx_ready) {
+          dlBtn.disabled = false;
+          dlBtn.textContent = '↓ Download PowerPoint';
+        } else {
+          dlBtn.disabled = true;
+          dlBtn.textContent = 'PowerPoint unavailable — use Rebuild';
+          // Show error detail
+          var rs = document.getElementById('rebuild-status');
+          rs.style.display = 'block';
+          rs.style.color = '#A32D2D';
+          rs.textContent = data.pptx_error
+            ? 'PowerPoint build failed: ' + data.pptx_error + '. Try "Rebuild from edited sections".'
+            : 'PowerPoint not built. Try "Rebuild from edited sections".';
+        }
+        actionsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+
+  } catch(e) {
+    console.error('Poll error:', e);
+  }
+}
+
+function renderSections(sections) {
+  var list = document.getElementById('sections-list');
+  sections.forEach(function(sec, i) {
+    var existing = document.getElementById('sec-card-' + sec.id);
+    if (existing) {
+      // Update textarea if user hasn't edited it
+      var ta = existing.querySelector('textarea');
+      if (ta && ta.dataset.pristine !== 'false') {
+        ta.value = sec.body;
+        ta.style.height = 'auto';
+        ta.style.height = ta.scrollHeight + 'px';
+      }
+      return;
+    }
+    var card = document.createElement('div');
+    card.className = 'section-card';
+    card.id = 'sec-card-' + sec.id;
+    card.innerHTML =
+      '<div class="section-head" onclick="toggleSection(this)">' +
+        '<span class="section-head-title">' + sec.heading + '</span>' +
+        '<button class="section-copy-btn" onclick="copySec(event,\\'' + sec.id + '\\')">Copy</button>' +
+      '</div>' +
+      '<div class="section-body">' +
+        '<textarea id="sec-ta-' + sec.id + '" onchange="this.dataset.pristine=\\'false\\'" ' +
+          'oninput="this.style.height=\\'auto\\';this.style.height=this.scrollHeight+\\'px\\'">' +
+          escHtml(sec.body) + '</textarea>' +
+      '</div>';
+    list.appendChild(card);
+    var ta = card.querySelector('textarea');
+    ta.dataset.pristine = 'true';
+    setTimeout(function(){ ta.style.height='auto'; ta.style.height=ta.scrollHeight+'px'; }, 50);
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
+}
+
+function toggleSection(head) {
+  var body = head.nextElementSibling;
+  body.style.display = body.style.display === 'none' ? 'block' : 'none';
+}
+
+function copySec(e, sid) {
+  e.stopPropagation();
+  var ta = document.getElementById('sec-ta-' + sid);
+  if (!ta) return;
+  var btn = e.target;
+  navigator.clipboard.writeText(ta.value).then(function() {
+    btn.textContent = 'Copied ✓';
+    setTimeout(function(){ btn.textContent = 'Copy'; }, 2000);
+  });
+}
+
+function renderIntel(intel, meta) {
+  document.getElementById('panel-intel').classList.remove('hidden');
+  var rows = [];
+  if (intel.contact_profile) rows.push(['Contact', intel.contact_profile]);
+  if (intel.org_context)     rows.push(['Organisation right now', intel.org_context]);
+  if (intel.why_now)         rows.push(['Why this brief exists', intel.why_now]);
+  if (intel.ambitions)       rows.push(['Strategic ambitions', intel.ambitions]);
+
+  document.getElementById('intel-body').innerHTML =
+    '<div class="intel-card">' +
+    rows.map(function(r) {
+      return '<div class="intel-row"><div class="intel-lbl">' + r[0] + '</div>' + escHtml(r[1]) + '</div>';
+    }).join('') +
+    '<p style="font-size:11px;color:var(--tx2);margin-top:.75rem">Verify key facts before the pitch meeting.</p>' +
+    '</div>';
+}
+
+function collectSections() {
+  var secs = [];
+  document.querySelectorAll('[id^="sec-ta-"]').forEach(function(ta) {
+    var sid = ta.id.replace('sec-ta-', '');
+    var card = document.getElementById('sec-card-' + sid);
+    var heading = card ? card.querySelector('.section-head-title').textContent : sid;
+    secs.push({ id: sid, heading: heading, body: ta.value });
+  });
+  return secs;
+}
+
+function downloadPPTX() {
+  if (!currentJobId) return;
+  window.location.href = '/download/' + currentJobId;
+}
+
+async function rebuildAndDownload() {
+  var sections = collectSections();
+  var st = document.getElementById('rebuild-status');
+  st.style.display = 'block';
+  st.textContent = 'Rebuilding PowerPoint from your edited sections...';
+
+  try {
+    var resp = await fetch('/rebuild', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: currentJobId, sections: sections, meta: currentMeta })
+    });
+    var data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    st.textContent = 'Done — downloading...';
+    setTimeout(function() { window.location.href = '/download/' + currentJobId; }, 500);
+  } catch(e) {
+    st.textContent = 'Error: ' + e.message;
+    st.style.color = '#A32D2D';
+  }
+}
+
+function resetAll() {
+  clearInterval(pollInterval);
+  currentJobId = null;
+  lastProgressLen = 0;
+  currentMeta = {};
+  jobDone = false;
+  document.getElementById('sections-list').innerHTML = '';
+  document.getElementById('intel-body').innerHTML = '';
+  document.getElementById('brief-pdf').value = '';
+  document.getElementById('brief-text').value = '';
+  document.getElementById('prog-bar').style.width = '0%';
+  document.getElementById('prog-msg').textContent = 'Starting...';
+  document.getElementById('submit-btn').disabled = false;
+  document.getElementById('submit-btn').textContent = 'Generate proposal →';
+  document.getElementById('nav-status').textContent = '';
+  ['panel-progress','panel-sections','panel-intel','panel-actions'].forEach(function(id) {
+    document.getElementById(id).classList.add('hidden');
+  });
+  document.getElementById('submit-error').classList.add('hidden');
+  document.getElementById('rebuild-status').style.display = 'none';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function escHtml(s) {
+  return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>
+"""
+
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return INDEX_HTML
 
 @app.route('/submit', methods=['POST'])
 def submit():

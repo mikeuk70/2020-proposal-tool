@@ -145,11 +145,14 @@ def explicit_bullets(txt, max_n=8):
             if len(item) > 8 and item not in bullets:
                 bullets.append(item)
     if not bullets:
+        # Fall back: any line that reads like a deliverable item
         for line in s.split('\n'):
-            line = re.sub(r'^[-\u2022*\d+.]:?\s*', '', line).strip()
-            if len(line) > 12 and line not in bullets:
-                bullets.append(line)
-    return bullets[:max_n]
+            line = line.strip()
+            if len(line) > 15 and not re.search(r'stage \d|riba|objective|process', line, re.I):
+                line = re.sub(r'^[-\u2022*]\s*', '', line)
+                if line not in bullets:
+                    bullets.append(line)
+    return [b for b in bullets if b][:max_n]
 
 def prose_only(txt, n=3):
     s = clean(txt)
@@ -157,13 +160,25 @@ def prose_only(txt, n=3):
     prose = []
     for line in lines:
         stripped = line.strip()
+        # Stop at bullet lists
         if stripped.startswith(('-', '\u2022', '*')) or re.match(r'^\d+[.):]', stripped):
             break
-        if stripped.lower().rstrip(':') in ('deliverables', 'outputs', 'scope', 'process', 'objective'):
+        # Stop at section keyword headings
+        if stripped.lower().rstrip(':') in ('deliverables', 'outputs', 'scope', 'process',
+                                             'objective', 'approach', 'programme', 'fees',
+                                             'next steps', 'our approach'):
             break
+        # Skip lines that look like AI-generated stage headers e.g. "Stage 1: ... | RIBA Stage 2 | 1 week"
+        if re.search(r'stage \d.*riba|riba.*stage \d|\|\s*\d+\s*week', stripped, re.IGNORECASE):
+            continue
+        # Skip lines that are just the section label repeated (e.g. "Your brief", "Cover letter")
+        if len(stripped) < 40 and '.' not in stripped and ',' not in stripped:
+            continue
         prose.append(stripped)
     text = ' '.join(l for l in prose if l)
-    return ' '.join(re.split(r'(?<=[.!?])\s+', text)[:n]).strip()
+    # Take first n sentences
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    return ' '.join(sentences[:n]).strip()
 
 def find_section(sections, *keys):
     for key in keys:
@@ -251,15 +266,17 @@ def replace_colour(xml_str, old, new):
 # ── SLIDE BUILDERS ────────────────────────────────────────────────────────────
 def build_cover(root, venue, contact, role, date_s):
     r = copy.deepcopy(root)
-    for tb in get_txbodies(r):
+    tbs = get_txbodies(r)
+    for i, tb in enumerate(tbs):
         ft = full_text(tb)
         rPr = get_first_rPr(tb)
         if 'Concept Presentation' in ft:
             set_text(tb, venue, rPr)
-        elif 'Stage 2' in ft and len(ft) < 20:
+        elif 'Stage 2' in ft and len(ft.strip()) < 25:
             set_text(tb, 'Hospitality design proposal', rPr)
-        elif any(x in ft for x in ["June", "25th", "'25"]) and date_s:
-            set_text(tb, date_s, rPr)
+        elif any(x in ft for x in ['June', '25th', "'25", 'th']):
+            if date_s:
+                set_text(tb, date_s, rPr)
     return r
 
 def build_hello(root):
@@ -291,10 +308,13 @@ def build_content_slide(root, section_label, title, intro, bullets):
             set_text(tb, title, rPr)
         elif 'Lorem ipsum' in ft or ('lorem' in ft.lower() and len(ft) > 30):
             items = []
-            if intro:
-                items.append((intro, {}))
+            # Clean intro — remove if it is just a short heading label
+            clean_intro = intro.strip() if intro else ''
+            if clean_intro and len(clean_intro) > 30:
+                items.append((clean_intro, {}))
             if bullets:
-                items.append(('', {}))
+                if items:
+                    items.append(('', {}))
                 for b in bullets:
                     items.append((b, {'bullet': True}))
             if items:
@@ -450,22 +470,26 @@ def build_pptx(sections, meta):
     with open(ct_path, 'w', encoding='utf-8') as f:
         f.write(ct)
 
-    # Also patch _rels/.rels which may reference the template relationship type
+    # Also patch _rels/.rels — change template relationship type to presentation
     rels_path = os.path.join(unpacked, '_rels', '.rels')
     if os.path.exists(rels_path):
         with open(rels_path, encoding='utf-8') as f:
             rels = f.read()
-        rels = rels.replace(
-            'relationships/officeDocument/2006/relationships/officeDocument',
-            'relationships/officeDocument/2006/relationships/officeDocument'
-        )
-        # Change template relationship to presentation
         rels = rels.replace(
             '/relationships/presentationml/template',
             '/relationships/presentationml/presentation'
         )
         with open(rels_path, 'w', encoding='utf-8') as f:
             f.write(rels)
+
+    # Fix viewProps.xml — template was saved in slide master view, change to normal view
+    vp_path = os.path.join(unpacked, 'ppt', 'viewProps.xml')
+    if os.path.exists(vp_path):
+        with open(vp_path, encoding='utf-8') as f:
+            vp = f.read()
+        vp = vp.replace('lastView="sldMasterView"', 'lastView="sldView"')
+        with open(vp_path, 'w', encoding='utf-8') as f:
+            f.write(vp)
 
     # Reorder slides — keep only our 10 proposal slides in the right order
     reorder_presentation(unpacked)

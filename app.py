@@ -599,11 +599,19 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
 
         # ── STEP 4: BUILD PPTX ───────────────────────────────────────────────
         progress('Building PowerPoint from template...', 88)
-        pptx_path, tmpdir = build_pptx(sections, meta)
-        job['pptx_path'] = pptx_path
-        job['tmpdir'] = tmpdir
-        job['status'] = 'done'
-        progress('Done', 100)
+        try:
+            pptx_path, tmpdir = build_pptx(sections, meta)
+            if not os.path.exists(pptx_path):
+                raise FileNotFoundError('Output PPTX was not created')
+            job['pptx_path'] = pptx_path
+            job['tmpdir'] = tmpdir
+            job['status'] = 'done'
+            progress('Done — click Download PowerPoint', 100)
+        except Exception as pptx_err:
+            # Sections are still available even if PPTX fails
+            job['status'] = 'done'
+            job['error'] = f'PPTX build failed: {pptx_err}'
+            progress(f'Sections ready but PowerPoint failed: {pptx_err}', 100)
 
     except Exception as e:
         job['status'] = 'error'
@@ -650,6 +658,23 @@ def submit():
 
     return jsonify({'job_id': job_id})
 
+@app.route('/debug/<job_id>')
+def debug(job_id):
+    """Shows full job state for troubleshooting."""
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    return jsonify({
+        'status':     job['status'],
+        'error':      job['error'],
+        'pptx_path':  job.get('pptx_path'),
+        'pptx_exists': os.path.exists(job['pptx_path']) if job.get('pptx_path') else False,
+        'template_exists': os.path.exists(TEMPLATE_PATH),
+        'template_path': TEMPLATE_PATH,
+        'sections_count': len(job.get('sections', [])),
+        'progress_last': job['progress'][-1] if job.get('progress') else None,
+    })
+
 @app.route('/status/<job_id>')
 def status(job_id):
     job = jobs.get(job_id)
@@ -692,10 +717,16 @@ def rebuild():
 @app.route('/download/<job_id>')
 def download(job_id):
     job = jobs.get(job_id)
-    if not job or not job.get('pptx_path'):
-        return 'Not found', 404
+    if not job:
+        return 'Job not found — jobs are cleared when the server restarts. Please generate again.', 404
+    if job.get('error'):
+        return f'Generation failed: {job["error"]}', 500
+    if not job.get('pptx_path'):
+        return f'PowerPoint not ready yet — status is {job.get("status","unknown")}. Try again in a moment.', 404
+    if not os.path.exists(job['pptx_path']):
+        return 'PowerPoint file missing — server may have restarted. Please generate again.', 404
 
-    venue = job.get('meta', {}).get('venue', 'Proposal').replace(' ', '_').replace("'", '')
+    venue = job.get('meta', {}).get('venue', 'Proposal').replace(' ', '_').replace("'", '').replace('&','and').replace('(','').replace(')','')
     filename = f'{venue}_20.20_Proposal.pptx'
 
     return send_file(

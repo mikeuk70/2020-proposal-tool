@@ -400,13 +400,31 @@ def build_pptx(sections, meta):
     save_slide(16, build_fees_slide(load_slide(16), fees_stages, accent))
     save_slide_str(26, replace_colour(slide26_raw, 'E8251A', accent))
 
-    # Pack into PPTX
+    # Pack into PPTX — [Content_Types].xml must be first, then _rels/.rels
+    # Use the original template as base and patch modified slides in
     output_path = os.path.join(tmpdir, 'output.pptx')
+
+    # Build a map of modified files
+    modified = {}
+    for root_dir, dirs, files in os.walk(unpacked):
+        for file in files:
+            fp = os.path.join(root_dir, file)
+            arc = os.path.relpath(fp, unpacked).replace(os.sep, '/')
+            with open(fp, 'rb') as f:
+                modified[arc] = f.read()
+
+    # Write zip with correct ordering: content types first, then rels, then everything else
     with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
-        for root_dir, dirs, files in os.walk(unpacked):
-            for file in files:
-                fp = os.path.join(root_dir, file)
-                zout.write(fp, os.path.relpath(fp, unpacked))
+        # 1. Content types must be first
+        if '[Content_Types].xml' in modified:
+            zout.writestr('[Content_Types].xml', modified['[Content_Types].xml'])
+        # 2. Root rels
+        if '_rels/.rels' in modified:
+            zout.writestr('_rels/.rels', modified['_rels/.rels'])
+        # 3. Everything else
+        for arc, data in modified.items():
+            if arc not in ('[Content_Types].xml', '_rels/.rels'):
+                zout.writestr(arc, data)
 
     return output_path, tmpdir
 

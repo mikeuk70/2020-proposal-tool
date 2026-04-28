@@ -646,7 +646,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
             if i < total - 1:
                 time.sleep(GAP)
 
-        job['sections'] = sections
+        update_job(job_id, sections=sections)
         progress('All sections written', 85)
 
         # ── STEP 4: BUILD PPTX ───────────────────────────────────────────────

@@ -635,8 +635,8 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
                 except anthropic.RateLimitError:
                     if attempt == 2:
                         sec = {'id': sid, 'heading': label, 'body': '[Could not generate — add manually]'}
-                    sections.append(sec)
-                    append_section(job_id, sec)
+                        sections.append(sec)
+                        append_section(job_id, sec)
                 except Exception as e:
                     sec = {'id': sid, 'heading': label, 'body': f'[Error: {str(e)[:80]}]'}
                     sections.append(sec)

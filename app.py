@@ -12,7 +12,14 @@ app.config['MAX_CONTENT_LENGTH'] = 20 * 1024 * 1024  # 20MB max upload
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
-TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), '2020_template_slim_b64.txt')
+# Find template file - check several locations
+_here = os.path.dirname(os.path.abspath(__file__))
+_candidates = [
+    os.path.join(_here, '2020_template_slim_b64.txt'),
+    '/app/2020_template_slim_b64.txt',
+    os.path.join(os.getcwd(), '2020_template_slim_b64.txt'),
+]
+TEMPLATE_PATH = next((p for p in _candidates if os.path.exists(p)), _candidates[0])
 
 # File-based job store — survives restarts and works across gunicorn workers
 JOBS_DIR = os.path.join(tempfile.gettempdir(), '2020_jobs')
@@ -946,6 +953,8 @@ async function submitBrief() {
     var data = await resp.json();
     if (data.error) throw new Error(data.error);
     currentJobId = data.job_id;
+    // Put job_id in URL so user can bookmark/debug
+    window.history.replaceState(null, '', '/?job=' + data.job_id);
     showProgress();
     pollInterval = setInterval(pollStatus, 2000);
   } catch(e) {
@@ -958,7 +967,7 @@ async function submitBrief() {
 
 function showProgress() {
   document.getElementById('panel-progress').classList.remove('hidden');
-  document.getElementById('nav-status').textContent = 'Generating…';
+  document.getElementById('nav-status').textContent = 'Generating… (job: ' + currentJobId + ')';
 }
 
 async function pollStatus() {
@@ -1249,7 +1258,7 @@ def status(job_id):
 
 @app.route('/rebuild', methods=['POST'])
 def rebuild():
-    """Rebuild PPTX from edited sections (user reviewed and changed text)."""
+    """Rebuild PPTX from edited sections."""
     data = request.get_json()
     job_id = data.get('job_id')
     sections = data.get('sections', [])
@@ -1259,13 +1268,13 @@ def rebuild():
         return jsonify({'error': 'No sections provided'}), 400
 
     try:
-        pptx_path, tmpdir = build_pptx(sections, meta)
-        # Store under same job_id
+        pptx_path, _tmpdir = build_pptx(sections, meta)
         if job_id:
-            update_job(job_id, pptx_path=pptx_path)
+            update_job(job_id, pptx_path=pptx_path, status='done', pptx_error=None)
         return jsonify({'status': 'ok', 'job_id': job_id})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        import traceback
+        return jsonify({'error': str(e), 'detail': traceback.format_exc()[-500:]}), 500
 
 @app.route('/download/<job_id>')
 def download(job_id):

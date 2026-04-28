@@ -14,8 +14,52 @@ app.config['MAX_CONTENT_LENGTH'] = 20 * 1024 * 1024  # 20MB max upload
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), '2020_template_slim_b64.txt')
 
-# In-memory job store (fine for this volume — a few per day)
-jobs = {}  # job_id -> {'status', 'progress', 'sections', 'meta', 'pptx_path', 'error'}
+# File-based job store — survives restarts and works across gunicorn workers
+JOBS_DIR = os.path.join(tempfile.gettempdir(), '2020_jobs')
+os.makedirs(JOBS_DIR, exist_ok=True)
+
+def job_path(job_id):
+    return os.path.join(JOBS_DIR, f'{job_id}.json')
+
+def pptx_path_for(job_id):
+    return os.path.join(JOBS_DIR, f'{job_id}.pptx')
+
+def load_job(job_id):
+    p = job_path(job_id)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def save_job(job_id, job):
+    p = job_path(job_id)
+    try:
+        with open(p, 'w') as f:
+            json.dump(job, f)
+    except Exception:
+        pass
+
+def update_job(job_id, **kwargs):
+    job = load_job(job_id) or {}
+    job.update(kwargs)
+    save_job(job_id, job)
+
+def append_progress(job_id, msg, pct=None):
+    job = load_job(job_id) or {}
+    prog = job.get('progress', [])
+    prog.append({'msg': msg, 'pct': pct})
+    job['progress'] = prog
+    save_job(job_id, job)
+
+def append_section(job_id, section):
+    job = load_job(job_id) or {}
+    secs = job.get('sections', [])
+    secs.append(section)
+    job['sections'] = secs
+    save_job(job_id, job)
 
 
 # ── NAMESPACES ────────────────────────────────────────────────────────────────
@@ -464,11 +508,10 @@ def build_context(meta, spaces_text=''):
 
 def run_pipeline(job_id, pdf_b64=None, brief_text=None):
     """Background thread: extract → research → generate → build PPTX."""
-    job = jobs[job_id]
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
     def progress(msg, pct=None):
-        job['progress'].append({'msg': msg, 'pct': pct})
+        append_progress(job_id, msg, pct)
 
     try:
         # ── STEP 1: EXTRACT ─────────────────────────────────────────────────
@@ -501,7 +544,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
         if not m:
             raise ValueError('Could not extract brief data from the document.')
         ex = json.loads(m.group(0))
-        job['extracted'] = ex
+        update_job(job_id, extracted=ex)
 
         meta = {
             'client':      ex.get('client', ''),
@@ -514,7 +557,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
             'scope':       ex.get('scope_summary', ''),
             'date':        time.strftime('%-d %B %Y'),
         }
-        job['meta'] = meta
+        update_job(job_id, meta=meta)
         spaces_text = '\n'.join(
             f"- {s['name']}" + (f" ({s['tier']})" if s.get('tier') else '') +
             (f", {s['size']}" if s.get('size') else '') +
@@ -543,9 +586,9 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
             )
             txt2 = ' '.join(b.text for b in resp2.content if hasattr(b, 'text'))
             m2 = re.search(r'\{[\s\S]*\}', txt2)
-            job['intel'] = json.loads(m2.group(0)) if m2 else {}
+            update_job(job_id, intel=json.loads(m2.group(0)) if m2 else {})
         except Exception:
-            job['intel'] = {}
+            update_job(job_id, intel={})
 
         progress('Client research complete', 20)
 
@@ -578,17 +621,19 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
                         system=SYSTEM_PROMPT,
                         messages=[{'role': 'user', 'content': prompt}]
                     )
-                    sections.append({
-                        'id': sid,
-                        'heading': label,
-                        'body': resp3.content[0].text.strip()
-                    })
+                    sec = {'id': sid, 'heading': label, 'body': resp3.content[0].text.strip()}
+                    sections.append(sec)
+                    append_section(job_id, sec)
                     break
                 except anthropic.RateLimitError:
                     if attempt == 2:
-                        sections.append({'id': sid, 'heading': label, 'body': f'[Could not generate — add manually]'})
+                        sec = {'id': sid, 'heading': label, 'body': '[Could not generate — add manually]'}
+                    sections.append(sec)
+                    append_section(job_id, sec)
                 except Exception as e:
-                    sections.append({'id': sid, 'heading': label, 'body': f'[Error: {str(e)[:80]}]'})
+                    sec = {'id': sid, 'heading': label, 'body': f'[Error: {str(e)[:80]}]'}
+                    sections.append(sec)
+                    append_section(job_id, sec)
                     break
 
             if i < total - 1:
@@ -603,19 +648,15 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
             pptx_path, tmpdir = build_pptx(sections, meta)
             if not os.path.exists(pptx_path):
                 raise FileNotFoundError('Output PPTX was not created')
-            job['pptx_path'] = pptx_path
-            job['tmpdir'] = tmpdir
-            job['status'] = 'done'
+            update_job(job_id, pptx_path=pptx_path, status='done')
             progress('Done — click Download PowerPoint', 100)
         except Exception as pptx_err:
             # Sections are still available even if PPTX fails
-            job['status'] = 'done'
-            job['error'] = f'PPTX build failed: {pptx_err}'
+            update_job(job_id, status='done', error=f'PPTX build failed: {pptx_err}')
             progress(f'Sections ready but PowerPoint failed: {pptx_err}', 100)
 
     except Exception as e:
-        job['status'] = 'error'
-        job['error'] = str(e)
+        update_job(job_id, status='error', error=str(e))
         progress(f'Error: {e}', None)
 
 
@@ -630,7 +671,7 @@ def submit():
         return jsonify({'error': 'API key not configured on server.'}), 500
 
     job_id = str(uuid.uuid4())[:8]
-    jobs[job_id] = {
+    save_job(job_id, {
         'status': 'running',
         'progress': [],
         'sections': [],
@@ -638,9 +679,8 @@ def submit():
         'intel': {},
         'extracted': {},
         'pptx_path': None,
-        'tmpdir': None,
         'error': None,
-    }
+    })
 
     pdf_b64 = None
     brief_text = None
@@ -661,32 +701,33 @@ def submit():
 @app.route('/debug/<job_id>')
 def debug(job_id):
     """Shows full job state for troubleshooting."""
-    job = jobs.get(job_id)
+    job = load_job(job_id)
     if not job:
-        return jsonify({'error': 'Job not found'}), 404
+        return jsonify({'error': 'Job not found', 'jobs_dir': JOBS_DIR}), 404
     return jsonify({
-        'status':     job['status'],
-        'error':      job['error'],
+        'status':     job.get('status'),
+        'error':      job.get('error'),
         'pptx_path':  job.get('pptx_path'),
         'pptx_exists': os.path.exists(job['pptx_path']) if job.get('pptx_path') else False,
         'template_exists': os.path.exists(TEMPLATE_PATH),
         'template_path': TEMPLATE_PATH,
+        'jobs_dir': JOBS_DIR,
         'sections_count': len(job.get('sections', [])),
-        'progress_last': job['progress'][-1] if job.get('progress') else None,
+        'progress_last': job.get('progress', [{}])[-1] if job.get('progress') else None,
     })
 
 @app.route('/status/<job_id>')
 def status(job_id):
-    job = jobs.get(job_id)
+    job = load_job(job_id)
     if not job:
         return jsonify({'error': 'Job not found'}), 404
     return jsonify({
-        'status':   job['status'],
-        'progress': job['progress'],
-        'sections': job['sections'],
-        'meta':     job['meta'],
-        'intel':    job['intel'],
-        'error':    job['error'],
+        'status':   job.get('status'),
+        'progress': job.get('progress', []),
+        'sections': job.get('sections', []),
+        'meta':     job.get('meta', {}),
+        'intel':    job.get('intel', {}),
+        'error':    job.get('error'),
     })
 
 @app.route('/rebuild', methods=['POST'])
@@ -703,20 +744,15 @@ def rebuild():
     try:
         pptx_path, tmpdir = build_pptx(sections, meta)
         # Store under same job_id
-        if job_id and job_id in jobs:
-            # Clean up old tmpdir
-            old_tmp = jobs[job_id].get('tmpdir')
-            if old_tmp and old_tmp != tmpdir:
-                shutil.rmtree(old_tmp, ignore_errors=True)
-            jobs[job_id]['pptx_path'] = pptx_path
-            jobs[job_id]['tmpdir'] = tmpdir
+        if job_id:
+            update_job(job_id, pptx_path=pptx_path)
         return jsonify({'status': 'ok', 'job_id': job_id})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/download/<job_id>')
 def download(job_id):
-    job = jobs.get(job_id)
+    job = load_job(job_id)
     if not job:
         return 'Job not found — jobs are cleared when the server restarts. Please generate again.', 404
     if job.get('error'):

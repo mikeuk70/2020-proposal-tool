@@ -651,12 +651,19 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
             update_job(job_id, pptx_path=pptx_path, status='done')
             progress('Done — click Download PowerPoint', 100)
         except Exception as pptx_err:
-            # Sections are still available even if PPTX fails
-            update_job(job_id, status='done', error=f'PPTX build failed: {pptx_err}')
-            progress(f'Sections ready but PowerPoint failed: {pptx_err}', 100)
+            import traceback
+            err_detail = traceback.format_exc()
+            update_job(job_id, status='done', pptx_error=str(pptx_err), pptx_traceback=err_detail)
+            progress(f'Sections complete. PowerPoint failed: {pptx_err}', 100)
 
     except Exception as e:
-        update_job(job_id, status='error', error=str(e))
+        import traceback
+        # Even on pipeline error, mark done if we have sections
+        job = load_job(job_id) or {}
+        if job.get('sections'):
+            update_job(job_id, status='done', error=str(e))
+        else:
+            update_job(job_id, status='error', error=str(e))
         progress(f'Error: {e}', None)
 
 
@@ -722,12 +729,14 @@ def status(job_id):
     if not job:
         return jsonify({'error': 'Job not found'}), 404
     return jsonify({
-        'status':   job.get('status'),
-        'progress': job.get('progress', []),
-        'sections': job.get('sections', []),
-        'meta':     job.get('meta', {}),
-        'intel':    job.get('intel', {}),
-        'error':    job.get('error'),
+        'status':     job.get('status'),
+        'progress':   job.get('progress', []),
+        'sections':   job.get('sections', []),
+        'meta':       job.get('meta', {}),
+        'intel':      job.get('intel', {}),
+        'error':      job.get('error'),
+        'pptx_error': job.get('pptx_error'),
+        'pptx_ready': bool(job.get('pptx_path') and os.path.exists(job.get('pptx_path',''))),
     })
 
 @app.route('/rebuild', methods=['POST'])

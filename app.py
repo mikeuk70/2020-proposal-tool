@@ -327,7 +327,8 @@ def build_stage_slide(slide14_raw, section_label, stage_title, body, deliverable
             set_text(tb, '[FEE: TBC — rate card required]', rPr, bold=True)
         elif i == 8:
             set_text(tb, 'Deliverables', rPr, colour=accent)
-    return ET.tostring(root, encoding='unicode', xml_declaration=True)
+    raw = ET.tostring(root, encoding='unicode')
+    return "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>\n" + raw
 
 def build_fees_slide(root, stages, accent):
     r = copy.deepcopy(root)
@@ -401,7 +402,10 @@ def build_pptx(sections, meta):
                     tx
                 )
                 tx = replace_colour(tx, 'E97132', accent)
-                with open(fpath, 'w') as f:
+                if tx.startswith('<?xml') and 'unicode' in tx[:60]:
+                    tx = tx[tx.index('?>')+2:].lstrip()
+                    tx = "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>\n" + tx
+                with open(fpath, 'w', encoding='utf-8') as f:
                     f.write(tx)
 
     def load_slide(n):
@@ -409,12 +413,20 @@ def build_pptx(sections, meta):
             return ET.fromstring(f.read())
 
     def save_slide(n, root_elem):
-        xml = ET.tostring(root_elem, encoding='unicode', xml_declaration=True)
+        # Strip ET's invalid 'encoding=unicode' declaration and use correct UTF-8 one
+        raw = ET.tostring(root_elem, encoding='unicode')
+        if raw.startswith('<?xml'):
+            raw = raw[raw.index('?>')+2:].lstrip()
+        xml = "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>\n" + raw
         xml = replace_colour(xml, 'E8251A', accent)
         with open(os.path.join(unpacked, 'ppt', 'slides', f'slide{n}.xml'), 'w', encoding='utf-8') as f:
             f.write(xml)
 
     def save_slide_str(n, xml_str):
+        # Fix declaration if present
+        if xml_str.startswith('<?xml'):
+            xml_str = xml_str[xml_str.index('?>')+2:].lstrip()
+        xml_str = "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>\n" + xml_str
         xml_str = replace_colour(xml_str, 'E8251A', accent)
         with open(os.path.join(unpacked, 'ppt', 'slides', f'slide{n}.xml'), 'w', encoding='utf-8') as f:
             f.write(xml_str)
@@ -513,6 +525,15 @@ def build_context(meta, spaces_text=''):
         f"SCOPE: {meta.get('scope','')}"
     )
 
+def strip_html(txt):
+    """Strip HTML tags from text — intel comes back with <cite> tags from web search."""
+    if not txt:
+        return ''
+    import re as _re
+    clean = _re.sub(r'<[^>]+>', '', str(txt))
+    clean = clean.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&nbsp;', ' ')
+    return ' '.join(clean.split())
+
 def run_pipeline(job_id, pdf_b64=None, brief_text=None):
     """Background thread: extract → research → generate → build PPTX."""
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -593,7 +614,9 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
             )
             txt2 = ' '.join(b.text for b in resp2.content if hasattr(b, 'text'))
             m2 = re.search(r'\{[\s\S]*\}', txt2)
-            update_job(job_id, intel=json.loads(m2.group(0)) if m2 else {})
+            raw_intel = json.loads(m2.group(0)) if m2 else {}
+            clean_intel = {k: strip_html(v) if isinstance(v, str) else v for k, v in raw_intel.items()}
+            update_job(job_id, intel=clean_intel)
         except Exception:
             update_job(job_id, intel={})
 
@@ -862,6 +885,36 @@ textarea:focus{border-color:var(--nv)}
     </div>
   </div>
 
+  <!-- TRIAGE NOTES -->
+  <div class="panel hidden" id="panel-triage">
+    <div class="panel-head"><h2>Triage</h2><span class="step-badge">Complete while generating</span></div>
+    <div class="panel-body">
+      <p style="font-size:12px;color:var(--tx2);margin-bottom:1rem">For internal assessment only — not sent to the AI.</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:.75rem">
+        <div><label class="field-label">Pursue?</label>
+          <select id="t-pursue" style="width:100%;padding:7px;border:1px solid var(--bd);border-radius:var(--r);font-family:inherit;font-size:13px;background:var(--bg)">
+            <option value="">— select —</option><option>Yes — full proposal</option><option>Yes — credentials only</option><option>Conditional</option><option>No</option>
+          </select></div>
+        <div><label class="field-label">Priority</label>
+          <select id="t-priority" style="width:100%;padding:7px;border:1px solid var(--bd);border-radius:var(--r);font-family:inherit;font-size:13px;background:var(--bg)">
+            <option value="">— select —</option><option>High — drop everything</option><option>Medium — fit around existing</option><option>Low — when capacity allows</option>
+          </select></div>
+        <div><label class="field-label">Resource available?</label>
+          <select id="t-resource" style="width:100%;padding:7px;border:1px solid var(--bd);border-radius:var(--r);font-family:inherit;font-size:13px;background:var(--bg)">
+            <option value="">— select —</option><option>Yes</option><option>Tight but manageable</option><option>Would need to delay other work</option><option>No capacity</option>
+          </select></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:.75rem">
+        <div><label class="field-label">Design lead</label>
+          <input type="text" id="t-lead" placeholder="Name" style="width:100%;padding:7px;border:1px solid var(--bd);border-radius:var(--r);font-family:inherit;font-size:13px"></div>
+        <div><label class="field-label">Creative lead</label>
+          <input type="text" id="t-creative" placeholder="Name" style="width:100%;padding:7px;border:1px solid var(--bd);border-radius:var(--r);font-family:inherit;font-size:13px"></div>
+      </div>
+      <div><label class="field-label">Key concerns or conditions</label>
+        <textarea id="t-concerns" rows="2" placeholder="e.g. Tight timeline, need to confirm budget before committing..." style="width:100%;padding:8px;border:1px solid var(--bd);border-radius:var(--r);font-family:inherit;font-size:13px;resize:vertical"></textarea></div>
+    </div>
+  </div>
+
   <!-- STEP 3: SECTIONS (appear during generation) -->
   <div class="panel hidden" id="panel-sections">
     <div class="panel-head">
@@ -992,9 +1045,10 @@ async function pollStatus() {
       renderSections(data.sections);
     }
 
-    // Store meta
+    // Store meta and reveal triage panel
     if (data.meta && data.meta.client) {
       currentMeta = data.meta;
+      document.getElementById('panel-triage').classList.remove('hidden');
     }
 
     // Done
@@ -1169,7 +1223,7 @@ function resetAll() {
   document.getElementById('submit-btn').disabled = false;
   document.getElementById('submit-btn').textContent = 'Generate proposal →';
   document.getElementById('nav-status').textContent = '';
-  ['panel-progress','panel-sections','panel-intel','panel-actions'].forEach(function(id) {
+  ['panel-progress','panel-triage','panel-sections','panel-intel','panel-actions'].forEach(function(id) {
     document.getElementById(id).classList.add('hidden');
   });
   document.getElementById('submit-error').classList.add('hidden');

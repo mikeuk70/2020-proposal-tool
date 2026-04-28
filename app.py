@@ -388,6 +388,36 @@ def build_pptx(sections, meta):
         slide14_raw = z.read('ppt/slides/slide14.xml').decode('utf-8')
         slide26_raw = z.read('ppt/slides/slide26.xml').decode('utf-8')
 
+    # Convert from .potx template to .pptx presentation format
+    # The template file has content type "presentationml.template" — PowerPoint
+    # refuses to open it as a regular file. Patch both places that declare this.
+    ct_path = os.path.join(unpacked, '[Content_Types].xml')
+    with open(ct_path, encoding='utf-8') as f:
+        ct = f.read()
+    ct = ct.replace(
+        'application/vnd.openxmlformats-officedocument.presentationml.template.main+xml',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml'
+    )
+    with open(ct_path, 'w', encoding='utf-8') as f:
+        f.write(ct)
+
+    # Also patch _rels/.rels which may reference the template relationship type
+    rels_path = os.path.join(unpacked, '_rels', '.rels')
+    if os.path.exists(rels_path):
+        with open(rels_path, encoding='utf-8') as f:
+            rels = f.read()
+        rels = rels.replace(
+            'relationships/officeDocument/2006/relationships/officeDocument',
+            'relationships/officeDocument/2006/relationships/officeDocument'
+        )
+        # Change template relationship to presentation
+        rels = rels.replace(
+            '/relationships/presentationml/template',
+            '/relationships/presentationml/presentation'
+        )
+        with open(rels_path, 'w', encoding='utf-8') as f:
+            f.write(rels)
+
     # Replace accent2 in all themes
     themes_dir = os.path.join(unpacked, 'ppt', 'theme')
     if os.path.exists(themes_dir):
@@ -599,26 +629,32 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
         progress('Researching the client...', 15)
         time.sleep(12)  # Let rate limit recover after extraction
 
-        research_prompt = (
-            f'Research {meta["contact"]} at {meta["client"] or meta["venue"]} for a design agency pitch. '
-            'Return ONLY valid JSON:\n'
-            '{"contact_profile":"2-3 sentences","org_context":"current position","'
-            'why_now":"why this brief exists","ambitions":"strategic goals","confidence":"high|medium|low"}'
-        )
-        try:
-            resp2 = client.messages.create(
-                model='claude-sonnet-4-20250514',
-                max_tokens=800,
-                tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
-                messages=[{'role': 'user', 'content': research_prompt}]
-            )
-            txt2 = ' '.join(b.text for b in resp2.content if hasattr(b, 'text'))
-            m2 = re.search(r'\{[\s\S]*\}', txt2)
-            raw_intel = json.loads(m2.group(0)) if m2 else {}
-            clean_intel = {k: strip_html(v) if isinstance(v, str) else v for k, v in raw_intel.items()}
-            update_job(job_id, intel=clean_intel)
-        except Exception:
+        contact_str = meta.get("contact","") or ""
+        org_str = meta.get("client","") or meta.get("venue","") or ""
+        if not contact_str and not org_str:
             update_job(job_id, intel={})
+        else:
+            research_prompt = (
+                f'Research {contact_str}{(" at " + org_str) if org_str else ""} for a hospitality design agency pitch. '
+                f'Find publicly available information about this person and organisation. '
+                'Return ONLY valid JSON:\n'
+                '{"contact_profile":"2-3 sentences about the person","org_context":"2-3 sentences on the organisation right now","'
+                'why_now":"why this brief likely exists","ambitions":"their strategic goals","confidence":"high|medium|low"}'
+            )
+            try:
+                resp2 = client.messages.create(
+                    model='claude-sonnet-4-20250514',
+                    max_tokens=800,
+                    tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
+                    messages=[{'role': 'user', 'content': research_prompt}]
+                )
+                txt2 = ' '.join(b.text for b in resp2.content if hasattr(b, 'text'))
+                m2 = re.search(r'\{[\s\S]*\}', txt2)
+                raw_intel = json.loads(m2.group(0)) if m2 else {}
+                clean_intel = {k: strip_html(v) if isinstance(v, str) else v for k, v in raw_intel.items()}
+                update_job(job_id, intel=clean_intel)
+            except Exception:
+                update_job(job_id, intel={})
 
         progress('Client research complete', 20)
 

@@ -1185,6 +1185,28 @@ function escHtml(s) {
 </html>
 """
 
+@app.route('/health')
+def health():
+    """Diagnostic route — shows what the server can find."""
+    import glob
+    here = os.path.dirname(os.path.abspath(__file__))
+    cwd = os.getcwd()
+    files_here = os.listdir(here)
+    files_cwd = os.listdir(cwd) if cwd != here else '(same as above)'
+    return jsonify({
+        'status': 'running',
+        'api_key_set': bool(ANTHROPIC_KEY),
+        'api_key_prefix': ANTHROPIC_KEY[:12] + '...' if ANTHROPIC_KEY else None,
+        'template_path': TEMPLATE_PATH,
+        'template_exists': os.path.exists(TEMPLATE_PATH),
+        'here': here,
+        'cwd': cwd,
+        'files_in_app_dir': files_here,
+        'files_in_cwd': files_cwd,
+        'jobs_dir': JOBS_DIR,
+        'jobs_dir_exists': os.path.exists(JOBS_DIR),
+    })
+
 @app.route('/')
 def index():
     return INDEX_HTML

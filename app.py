@@ -361,6 +361,55 @@ def build_fees_slide(root, stages, accent):
 
 
 # ── PPTX BUILDER ─────────────────────────────────────────────────────────────
+
+def reorder_presentation(unpacked):
+    """
+    Rewrite presentation.xml to show only our 10 proposal slides in the right order.
+    The template has 32 slides — we select and reorder just the ones we need.
+    """
+    prs_path = os.path.join(unpacked, 'ppt', 'presentation.xml')
+    with open(prs_path, encoding='utf-8') as f:
+        prs_xml = f.read()
+
+    P_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main'
+    R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+
+    root = ET.fromstring(prs_xml)
+    sldIdLst = root.find(f'{{{P_NS}}}sldIdLst')
+    if sldIdLst is None:
+        return  # can't find slide list, leave as-is
+
+    # Map rId -> slide element from original list
+    existing = {sld.get(f'{{{R_NS}}}id'): sld for sld in sldIdLst}
+
+    # Our desired slide order (rId, slide_num, label)
+    DECK_ORDER = [
+        ('rId2',  'Cover'),
+        ('rId28', 'Hello — cover letter'),
+        ('rId9',  'Our understanding'),
+        ('rId29', 'Our methodology divider'),
+        ('rId15', 'Stage 1'),
+        ('rId10', 'Stage 2'),
+        ('rId11', 'Stage 3'),
+        ('rId12', 'Stages 4-6'),
+        ('rId17', 'Fees and timings'),
+        ('rId27', 'Next steps'),
+    ]
+
+    # Clear the slide list and rebuild in our order
+    for child in list(sldIdLst):
+        sldIdLst.remove(child)
+
+    for rid, _ in DECK_ORDER:
+        if rid in existing:
+            sldIdLst.append(existing[rid])
+
+    # Write back
+    new_xml = ET.tostring(root, encoding='unicode', xml_declaration=False)
+    new_xml = "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>\n" + new_xml
+    with open(prs_path, 'w', encoding='utf-8') as f:
+        f.write(new_xml)
+
 def build_pptx(sections, meta):
     """Build a PPTX from proposal sections and metadata. Returns path to temp file."""
     accent = detect_colour(meta.get('client', ''))
@@ -417,6 +466,9 @@ def build_pptx(sections, meta):
         )
         with open(rels_path, 'w', encoding='utf-8') as f:
             f.write(rels)
+
+    # Reorder slides — keep only our 10 proposal slides in the right order
+    reorder_presentation(unpacked)
 
     # Replace accent2 in all themes
     themes_dir = os.path.join(unpacked, 'ppt', 'theme')

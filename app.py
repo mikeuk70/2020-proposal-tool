@@ -608,25 +608,61 @@ DESIGN PRINCIPLES: Hospitality Pyramid (tier each space), Narrative Before Desig
 
 PLACEHOLDERS: [FEE: TBC — rate card required] for fees, [IMAGE REQUIRED: description] for visuals, [CONFIRM WITH CLIENT: note] for assumptions."""
 
+# Stage prompt template — generates structured content with four named sections
+# Works for both RIBA-staged and phase-based proposals
+STAGE_PROMPT = """Write the {stage_name} section for this 20.20 hospitality design proposal.
+Structure your response using exactly these four labels on their own lines:
+
+Objective:
+[1-2 sentences on what this stage achieves commercially and creatively]
+
+Process:
+[3-5 bullet points — how we work through this stage step by step]
+
+Deliverables:
+[5-8 bullet points — specific tangible outputs the client receives]
+
+Meetings & Presentations:
+[2-4 bullet points — review meetings, client presentations, sign-off points]
+
+Important:
+- Use "the club", "the venue", "the project" or "the space" — never the client name
+- Keep each bullet to one clear line
+- No em dashes
+- If this is not a RIBA-staged project, use plain language (not RIBA references)
+
+{ctx}"""
+
 SECTIONS = [
-    ('cover',   'Cover letter',                  'Write the cover letter. Address {contact} by first name. Client is {client}. Personal, direct, 3-4 short paragraphs. This is the ONLY section where the client name appears.\n\n{ctx}'),
-    ('brief',   'Your brief',                    'Write the brief reflection titled "Your brief". Show understanding of the commercial context. Use "the club" or "the venue" — not the client name. 2-3 paragraphs.\n\n{ctx}'),
-    ('approach','Our approach',                  'Write a short "Our approach" intro (4-6 sentences). Methodology overview — RIBA-staged, commercially conscious, narrative-led. No client name.\n\n{ctx}'),
-    ('stage1',  'Stage 1 — Strategic framework', 'Write Stage 1 (Strategic framework / RIBA 2 / 1 week). Objective paragraph, process paragraph, then bullet deliverables. No client name.\n\n{ctx}'),
-    ('stage2',  'Stage 2 — Concept design',      'Write Stage 2 (Concept design / RIBA 2 / 2 weeks). Objective, process, bullet deliverables including CGI commitment (min 2 per space). No client name.\n\n{ctx}'),
-    ('stage3',  'Stage 3 — Design development',  'Write Stage 3 (Design development / RIBA 2 / 2 weeks). Objective, process, bullet deliverables including concept freeze. No client name.\n\n{ctx}'),
-    ('stage456','Stages 4, 5 and 6',             'Write combined section for Stage 4 (Design intent/RIBA 3/4 wks), Stage 5 (Coordination/RIBA 4-5), Stage 6 (Handover/RIBA 6). One paragraph + bullets per stage. No client name.\n\n{ctx}'),
-    ('fees',    'Fees and timings',               'Write the fees section. Six stages, [FEE: TBC] for all figures. Three disciplines per stage. Note VAT and expenses exclusions.\n\n{ctx}'),
-    ('programme','Estimated programme',           'Write a programme narrative (1 paragraph) covering the season window and key milestones. No client name.\n\n{ctx}'),
-    ('nextsteps','Next steps',                    'Write next steps. Four actions: review, feedback, site visit, appointment. Direct and confident.\n\n{ctx}'),
+    ('cover',   'Cover letter',
+     'Write the cover letter. Address {contact} by first name. Client is {client}. Personal, direct, 3-4 short paragraphs. Reference what we know about their project and ambitions. This is the ONLY section where the client name appears.\n\n{ctx}'),
+    ('brief',   'Your brief',
+     'Write "Your brief" — our understanding of the project. Show commercial and strategic awareness. 2-3 paragraphs then 4-6 bullet points covering key project facts and drivers. Use "the club" or "the venue". No client name.\n\n{ctx}'),
+    ('stage1',  'Stage 1 — Strategic framework',
+     STAGE_PROMPT.format(stage_name='Stage 1 — Strategic framework (RIBA Stage 2, 1 week)', ctx='{ctx}')),
+    ('stage2',  'Stage 2 — Concept design',
+     STAGE_PROMPT.format(stage_name='Stage 2 — Concept design (RIBA Stage 2, 2 weeks). Include CGI commitment — minimum 2 visuals per space in Deliverables', ctx='{ctx}')),
+    ('stage3',  'Stage 3 — Design development',
+     STAGE_PROMPT.format(stage_name='Stage 3 — Design development (RIBA Stage 2, 2 weeks). Include concept freeze milestone in Deliverables', ctx='{ctx}')),
+    ('stage456','Stages 4, 5 and 6',
+     STAGE_PROMPT.format(stage_name='Stages 4, 5 and 6 (Design intent / Coordination / Handover). Within each of the four sections use sub-headings Stage 4 / Stage 5 / Stage 6', ctx='{ctx}')),
+    ('fees',    'Fees and timings',
+     'Write the fees section. List each stage with [FEE: TBC] for all figures. Note timings per stage. Fees are exclusive of VAT, 3rd party costs, general expenses and travel. Subject to contract.\n\n{ctx}'),
+    ('nextsteps','Next steps',
+     'Write next steps as four numbered actions: review, feedback, site visit, appointment. Direct and confident. 1-2 sentences each. No client name.\n\n{ctx}'),
 ]
 
 def build_context(meta, spaces_text=''):
+    bt = meta.get('brief_type','')
+    riba = meta.get('riba_stages','')
+    stage_context = f"RIBA STAGES: {riba}" if riba and 'riba' in riba.lower() else (
+        f"STAGES/PHASES: {riba}" if riba else "STAGES: To be confirmed with client"
+    )
     return (
         f"PROJECT: {meta.get('venue','')}\n"
         f"CONTACT: {meta.get('contact','')}{', '+meta.get('role','') if meta.get('role') else ''}\n"
-        f"BRIEF TYPE: {meta.get('brief_type','')}\n"
-        f"RIBA STAGES: {meta.get('riba_stages','TBC')}\n"
+        f"BRIEF TYPE: {bt}\n"
+        f"{stage_context}\n"
         f"BUDGET: {meta.get('budget','Not stated')}\n"
         f"SPACES: {spaces_text or 'See scope summary'}\n"
         f"SCOPE: {meta.get('scope','')}"
@@ -1005,29 +1041,84 @@ textarea:focus{border-color:var(--nv)}
   <div class="panel hidden" id="panel-triage">
     <div class="panel-head"><h2>Triage</h2><span class="step-badge">Complete while generating</span></div>
     <div class="panel-body">
-      <p style="font-size:12px;color:var(--tx2);margin-bottom:1rem">For internal assessment only — not sent to the AI.</p>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:.75rem">
-        <div><label class="field-label">Pursue?</label>
-          <select id="t-pursue" style="width:100%;padding:7px;border:1px solid var(--bd);border-radius:var(--r);font-family:inherit;font-size:13px;background:var(--bg)">
-            <option value="">— select —</option><option>Yes — full proposal</option><option>Yes — credentials only</option><option>Conditional</option><option>No</option>
+      <p style="font-size:12px;color:var(--tx2);margin-bottom:1rem">For internal use only — informs win likelihood score. Not sent to the AI.</p>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;margin-bottom:.75rem">
+        <div><label class="field-label">Pursue this brief?</label>
+          <select id="t-pursue" class="t-sel" onchange="calcWin()">
+            <option value="">— select —</option>
+            <option value="3">Yes — full proposal</option>
+            <option value="2">Yes — credentials only</option>
+            <option value="1">Conditional</option>
+            <option value="0">No</option>
           </select></div>
-        <div><label class="field-label">Priority</label>
-          <select id="t-priority" style="width:100%;padding:7px;border:1px solid var(--bd);border-radius:var(--r);font-family:inherit;font-size:13px;background:var(--bg)">
-            <option value="">— select —</option><option>High — drop everything</option><option>Medium — fit around existing</option><option>Low — when capacity allows</option>
+        <div><label class="field-label">Client status</label>
+          <select id="t-client-status" class="t-sel" onchange="calcWin()">
+            <option value="">— select —</option>
+            <option value="3">Current client — ongoing</option>
+            <option value="3">Returning client</option>
+            <option value="2">Warm — previous contact</option>
+            <option value="1">New — inbound approach</option>
+            <option value="0">New — cold outreach</option>
           </select></div>
+        <div><label class="field-label">Competitive pitch?</label>
+          <select id="t-competitive" class="t-sel" onchange="calcWin()">
+            <option value="">— select —</option>
+            <option value="3">Direct appointment</option>
+            <option value="2">2-3 agencies</option>
+            <option value="1">4-5 agencies</option>
+            <option value="0">Open tender (6+)</option>
+          </select></div>
+        <div><label class="field-label">Brief quality</label>
+          <select id="t-brief-quality" class="t-sel" onchange="calcWin()">
+            <option value="">— select —</option>
+            <option value="3">Detailed — clear scope and budget</option>
+            <option value="2">Good — scope clear, budget TBC</option>
+            <option value="1">Outline — needs development</option>
+            <option value="0">Vague — significant unknowns</option>
+          </select></div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;margin-bottom:.75rem">
         <div><label class="field-label">Resource available?</label>
-          <select id="t-resource" style="width:100%;padding:7px;border:1px solid var(--bd);border-radius:var(--r);font-family:inherit;font-size:13px;background:var(--bg)">
-            <option value="">— select —</option><option>Yes</option><option>Tight but manageable</option><option>Would need to delay other work</option><option>No capacity</option>
+          <select id="t-resource" class="t-sel" onchange="calcWin()">
+            <option value="">— select —</option>
+            <option value="2">Yes — team ready</option>
+            <option value="1">Tight but manageable</option>
+            <option value="1">Would need to juggle</option>
+            <option value="0">No capacity currently</option>
           </select></div>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:.75rem">
+        <div><label class="field-label">Timescale realistic?</label>
+          <select id="t-timescale" class="t-sel" onchange="calcWin()">
+            <option value="">— select —</option>
+            <option value="2">Yes — comfortable</option>
+            <option value="1">Tight but achievable</option>
+            <option value="0">Unrealistic as stated</option>
+          </select></div>
         <div><label class="field-label">Design lead</label>
-          <input type="text" id="t-lead" placeholder="Name" style="width:100%;padding:7px;border:1px solid var(--bd);border-radius:var(--r);font-family:inherit;font-size:13px"></div>
+          <input type="text" id="t-lead" placeholder="Name" class="t-inp"></div>
         <div><label class="field-label">Creative lead</label>
-          <input type="text" id="t-creative" placeholder="Name" style="width:100%;padding:7px;border:1px solid var(--bd);border-radius:var(--r);font-family:inherit;font-size:13px"></div>
+          <input type="text" id="t-creative" placeholder="Name" class="t-inp"></div>
       </div>
-      <div><label class="field-label">Key concerns or conditions</label>
-        <textarea id="t-concerns" rows="2" placeholder="e.g. Tight timeline, need to confirm budget before committing..." style="width:100%;padding:8px;border:1px solid var(--bd);border-radius:var(--r);font-family:inherit;font-size:13px;resize:vertical"></textarea></div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:.75rem">
+        <div><label class="field-label">Other agencies shortlisted (if known)</label>
+          <input type="text" id="t-competitors" placeholder="e.g. Bergman Interiors, Loop Creative" class="t-inp"></div>
+        <div><label class="field-label">Key concerns or conditions</label>
+          <input type="text" id="t-concerns" placeholder="e.g. Budget too low, timeline needs clarifying" class="t-inp"></div>
+      </div>
+
+      <!-- Win likelihood score -->
+      <div id="win-score-panel" style="display:none;background:var(--nv);border-radius:var(--r);padding:.75rem 1rem;display:flex;align-items:center;gap:1rem">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:rgba(255,255,255,.5)">Win likelihood</div>
+        <div id="win-score-value" style="font-size:28px;font-weight:700;color:#fff;font-family:inherit">—</div>
+        <div id="win-score-label" style="font-size:13px;color:rgba(255,255,255,.7)"></div>
+        <div style="flex:1"></div>
+        <div id="win-score-bar-wrap" style="width:180px;height:8px;background:rgba(255,255,255,.15);border-radius:4px;overflow:hidden">
+          <div id="win-score-bar" style="height:100%;border-radius:4px;transition:width .4s"></div>
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -1284,6 +1375,43 @@ function renderIntel(intel, meta) {
     }).join('') +
     '<p style="font-size:11px;color:var(--tx2);margin-top:.75rem">Verify key facts before the pitch meeting.</p>' +
     '</div>';
+}
+
+// Triage input styles applied via class
+(function() {
+  var style = document.createElement('style');
+  style.textContent = '.t-sel,.t-inp{width:100%;padding:7px;border:1px solid var(--bd);border-radius:var(--r);font-family:inherit;font-size:13px;background:var(--bg)} .t-sel:focus,.t-inp:focus{outline:none;border-color:var(--nv)}';
+  document.head.appendChild(style);
+})();
+
+function calcWin() {
+  var fields = ['t-pursue','t-client-status','t-competitive','t-brief-quality','t-resource','t-timescale'];
+  var total = 0; var filled = 0; var max = 13; // 3+3+3+3+2+2 = 16 max but pursue=0 exits
+  var pursue = document.getElementById('t-pursue');
+  if (pursue && pursue.value === '0') {
+    document.getElementById('win-score-value').textContent = 'Pass';
+    document.getElementById('win-score-label').textContent = 'Decision: do not pursue';
+    document.getElementById('win-score-bar').style.width = '0%';
+    document.getElementById('win-score-bar').style.background = '#E53935';
+    document.getElementById('win-score-panel').style.display = 'flex';
+    return;
+  }
+  fields.forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el && el.value !== '') { total += parseInt(el.value||0); filled++; }
+  });
+  if (filled < 2) { document.getElementById('win-score-panel').style.display = 'none'; return; }
+  var pct = Math.round((total / 16) * 100);
+  var label, colour;
+  if (pct >= 75)      { label = 'Strong — prioritise this one'; colour = '#43A047'; }
+  else if (pct >= 55) { label = 'Good — worth a full effort'; colour = '#C9A84C'; }
+  else if (pct >= 35) { label = 'Marginal — credentials only?'; colour = '#E97132'; }
+  else                { label = 'Low — consider declining'; colour = '#E53935'; }
+  document.getElementById('win-score-value').textContent = pct + '%';
+  document.getElementById('win-score-label').textContent = label;
+  document.getElementById('win-score-bar').style.width = pct + '%';
+  document.getElementById('win-score-bar').style.background = colour;
+  document.getElementById('win-score-panel').style.display = 'flex';
 }
 
 function collectSections() {

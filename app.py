@@ -634,33 +634,54 @@ Important:
 {ctx}"""
 
 SECTIONS = [
-    ('cover',   'Cover letter',
-     '''Write the cover letter for this 20.20 proposal. This appears as the "Hello" slide — a personal letter from the 20.20 team to the client contact.
+        ('cover',   'Cover letter',
+     '''Write the cover letter for this 20.20 proposal. It appears as the "Hello" slide.
+
+Headline: "Hello [first name of contact]" — NOT "Hello." — use the contact's first name directly in the headline.
+If there are two contacts, write "Hello [first name] and [first name]".
 
 Format:
-- Start with "Dear [first name of contact],"
-- 3-4 short paragraphs of no more than 4 sentences each
-- Sign off: "Kind regards,\nThe 20.20 team"
+- Headline: Hello [Name] (this goes on the slide as the large heading — write it as the first line)
+- Then: "Dear [Name]," on the next line
+- 3-4 short paragraphs, no more than 4 sentences each
+- Sign off: "Kind regards," then "The 20.20 team"
 
-Paragraph 1: A personal, confident opening. Reference something specific about the project or the club that shows we have done our homework. Make it feel like it comes from someone who genuinely knows this world.
+Paragraph 1: A personal, warm but direct opening. Reference something specific about this project or venue. If this is a continuation of previous work or a rebrief, acknowledge that directly and warmly.
 
-Paragraph 2: What this proposal contains — the stages covered, what we are committing to deliver, and what we need from the client to make it work.
+Paragraph 2: What this proposal contains — the specific areas, stages or phases covered, what we are committing to deliver.
 
-Paragraph 3: A short statement of why 20.20 is the right partner. Reference the hospitality pyramid approach, narrative-led design, commercial rigour. Not boastful — just direct and confident.
+Paragraph 3: What we need from the client to make it work — decisions required, access needed, timescales to respect.
 
-Paragraph 4 (optional): A forward-looking line about next steps or what excites us about the project.
+Paragraph 4: A short confident close.
 
 Rules:
-- Address the contact by first name in the opening line only
-- The client organisation name may appear naturally once or twice — this is the only section where it does
-- No em dashes
-- No AI phrases (leveraging, seamless, holistic, transformative)
-- Short sentences. Active voice.
-- Warm but professional — not corporate, not salesy
+- Short sentences. Active voice. No em dashes.
+- Avoid: leveraging, seamless, holistic, transformative, deliverables-led
+- The client organisation name may appear once — this is the only section where it does
+- Do NOT add stage labels, bullet points or headings — just flowing letter prose
 
 {ctx}'''),
     ('brief',   'Your brief',
-     'Write "Your brief" — our understanding of the project. Show commercial and strategic awareness. 2-3 paragraphs then 4-6 bullet points covering key project facts and drivers. Use "the club" or "the venue". No client name.\n\n{ctx}'),
+     '''Write "Your brief" — this reflects back our understanding of what the client told us.
+
+This section should be SPECIFIC not strategic. Quote or closely paraphrase what the brief says.
+Name the actual spaces (e.g. "The James Herriot Restaurant", "Platinum Suite", "Board Room").
+Include actual numbers where given (capacity, target revenue, budget range, season window).
+Reference the specific challenges they have raised (existing problems, style preferences, dislikes).
+
+Structure:
+- Opening paragraph: the overall project and commercial context (2-3 sentences)
+- Then one short paragraph per key space or area being designed, covering:
+  - Name of space and its position in the hospitality hierarchy
+  - Current problem or opportunity
+  - Specific requirements from the brief (seating, F&B, atmosphere, operational need)
+- If spaces are unknown or not named in the brief, acknowledge this
+- If the brief has gaps (budget not stated, scope unclear), flag them with [CONFIRM WITH CLIENT: ...]
+
+Use "the club" or "the venue" — not the client name.
+Write as 20.20 reflecting the brief back — confident, specific, no generic filler.
+
+{ctx}'''),
     ('stage1',  'Stage 1 — Strategic framework',
      STAGE_PROMPT.format(stage_name='Stage 1 — Strategic framework (RIBA Stage 2, 1 week)', ctx='{ctx}')),
     ('stage2',  'Stage 2 — Concept design',
@@ -678,18 +699,40 @@ Rules:
 def build_context(meta, spaces_text=''):
     bt = meta.get('brief_type','')
     riba = meta.get('riba_stages','')
+    continuation = meta.get('continuation','no')
+    prior = meta.get('prior_stages_completed','')
+    preferences = meta.get('key_preferences','')
+    constraints = meta.get('key_constraints','')
+    second = meta.get('second_contact','')
+
     stage_context = f"RIBA STAGES: {riba}" if riba and 'riba' in riba.lower() else (
         f"STAGES/PHASES: {riba}" if riba else "STAGES: To be confirmed with client"
     )
-    return (
+    contact_line = meta.get('contact','')
+    if meta.get('role'):
+        contact_line += f", {meta['role']}"
+    if second:
+        contact_line += f" and {second}"
+
+    ctx = (
         f"PROJECT: {meta.get('venue','')}\n"
-        f"CONTACT: {meta.get('contact','')}{', '+meta.get('role','') if meta.get('role') else ''}\n"
+        f"CONTACT: {contact_line}\n"
         f"BRIEF TYPE: {bt}\n"
+        f"CONTINUATION OF PRIOR WORK: {continuation.upper()}\n"
+    )
+    if prior:
+        ctx += f"PRIOR STAGES COMPLETED: {prior}\n"
+    ctx += (
         f"{stage_context}\n"
         f"BUDGET: {meta.get('budget','Not stated')}\n"
-        f"SPACES: {spaces_text or 'See scope summary'}\n"
-        f"SCOPE: {meta.get('scope','')}"
+        f"SPACES:\n{spaces_text or meta.get('scope','See scope summary')}\n"
+        f"SCOPE: {meta.get('scope','')}\n"
     )
+    if preferences:
+        ctx += f"CLIENT PREFERENCES/DISLIKES FROM BRIEF: {preferences}\n"
+    if constraints:
+        ctx += f"KEY CONSTRAINTS: {constraints}\n"
+    return ctx.strip()
 
 def strip_html(txt):
     """Strip HTML tags from text — intel comes back with <cite> tags from web search."""
@@ -700,7 +743,7 @@ def strip_html(txt):
     clean = clean.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&nbsp;', ' ')
     return ' '.join(clean.split())
 
-def run_pipeline(job_id, pdf_b64=None, brief_text=None):
+def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
     """Background thread: extract → research → generate → build PPTX."""
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
@@ -711,13 +754,16 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
         # ── STEP 1: EXTRACT ─────────────────────────────────────────────────
         progress('Reading the brief...', 5)
         extract_prompt = (
-            'Read this client brief. Extract all structured data and return ONLY valid JSON:\n'
-            '{"brief_type":"newbuild|refurb|single|sponsor|arena",'
+            'Read this client brief carefully. Extract all structured data and return ONLY valid JSON with NO markdown:\n'
+            '{"brief_type":"newbuild|refurb|single_space|sponsor|arena|continuation","continuation":"yes|no",'
             '"client":"","venue":"","primary_contact":"","contact_role":"",'
-            '"proposal_deadline":"","completion_target":"","budget_stated":"",'
-            '"riba_stages":"","spaces":[{"name":"","tier":"","size":"","budget":""}],'
-            '"payback_target":"","brief_source":"Direct approach from client|Via lead architect or PM|Formal open tender (ITT)|Referral|Repeat client / existing relationship|Unknown",'
-            '"scope_summary":"2-3 sentences"}'
+            '"second_contact":"","proposal_deadline":"","completion_target":"","budget_stated":"",'
+            '"riba_stages":"","spaces":[{"name":"","tier":"","capacity":"","size":"","budget":"","current_issues":""}],'
+            '"payback_target":"","prior_stages_completed":"",'
+            '"brief_source":"Direct approach|Via architect or PM|Formal tender (ITT)|Referral|Repeat client|Unknown",'
+            '"scope_summary":"2-3 sentences describing the full scope exactly as stated",'
+            '"key_preferences":"specific likes, dislikes, named references from brief",'
+            '"key_constraints":"timeline, budget, operational constraints"}'
         )
 
         if pdf_b64:
@@ -741,15 +787,20 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
         update_job(job_id, extracted=ex)
 
         meta = {
-            'client':      ex.get('client', ''),
-            'venue':       ex.get('venue', ''),
-            'contact':     ex.get('primary_contact', ''),
-            'role':        ex.get('contact_role', ''),
-            'brief_type':  ex.get('brief_type', ''),
-            'riba_stages': ex.get('riba_stages', ''),
-            'budget':      ex.get('budget_stated', ''),
-            'scope':       ex.get('scope_summary', ''),
-            'date':        time.strftime('%-d %B %Y'),
+            'client':                ex.get('client', ''),
+            'venue':                 ex.get('venue', ''),
+            'contact':               ex.get('primary_contact', ''),
+            'role':                  ex.get('contact_role', ''),
+            'second_contact':        ex.get('second_contact', ''),
+            'brief_type':            ex.get('brief_type', ''),
+            'continuation':          ex.get('continuation', 'no'),
+            'prior_stages_completed':ex.get('prior_stages_completed', ''),
+            'riba_stages':           ex.get('riba_stages', ''),
+            'budget':                ex.get('budget_stated', ''),
+            'scope':                 ex.get('scope_summary', ''),
+            'key_preferences':       ex.get('key_preferences', ''),
+            'key_constraints':       ex.get('key_constraints', ''),
+            'date':                  time.strftime('%-d %B %Y'),
         }
         update_job(job_id, meta=meta)
         spaces_text = '\n'.join(
@@ -758,6 +809,11 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
             (f", {s['budget']}" if s.get('budget') else '')
             for s in ex.get('spaces', [])
         ) or 'Not listed'
+
+        # Inject prior work context if provided
+        if prior_work:
+            meta['continuation'] = 'yes'
+            meta['prior_stages_completed'] = (meta.get('prior_stages_completed','') + ' ' + prior_work).strip()
 
         progress(f'Brief read — {meta["client"] or "client"} / {meta["venue"] or "project"}', 10)
 
@@ -1032,6 +1088,20 @@ textarea:focus{border-color:var(--nv)}
         <textarea id="brief-text" placeholder="Paste the brief here — email, copied PDF text, ITT, meeting notes..."></textarea>
       </div>
 
+      <div style="margin-top:.75rem;padding:.75rem;background:var(--bg);border:1px solid var(--bd);border-radius:var(--r)">
+        <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem">
+          <label class="field-label" style="margin:0">Continuation of prior work?</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--tx2);cursor:pointer">
+            <input type="checkbox" id="prior-work-toggle" onchange="togglePriorWork()">
+            Yes — there is prior context to include
+          </label>
+        </div>
+        <div id="prior-work-panel" style="display:none;margin-top:.5rem">
+          <label class="field-label">Briefly describe the prior work (stages completed, key decisions made)</label>
+          <textarea id="prior-work-text" rows="2" placeholder="e.g. Stages 1-3 completed in 2024. Concept was approved in March. Client likes the maroon palette but wants to revisit the bar layout in the Gold lounge..." style="width:100%;padding:8px;border:1px solid var(--bd);border-radius:var(--r);font-family:inherit;font-size:13px;resize:vertical"></textarea>
+        </div>
+      </div>
+
       <div id="submit-error" class="error-box hidden"></div>
 
       <div style="margin-top:1rem">
@@ -1213,6 +1283,11 @@ function switchTab(t) {
   document.getElementById('tab-text').className = 'tab-btn ' + (t === 'text' ? 'active' : 'inactive');
 }
 
+function togglePriorWork() {
+  var chk = document.getElementById('prior-work-toggle');
+  document.getElementById('prior-work-panel').style.display = chk.checked ? 'block' : 'none';
+}
+
 async function submitBrief() {
   var errEl = document.getElementById('submit-error');
   errEl.classList.add('hidden');
@@ -1226,6 +1301,13 @@ async function submitBrief() {
     var txt = document.getElementById('brief-text').value.trim();
     if (!txt) { errEl.textContent = 'Please paste the brief text.'; errEl.classList.remove('hidden'); return; }
     fd.append('brief_text', txt);
+  }
+
+  // Add prior work context if provided
+  var priorToggle = document.getElementById('prior-work-toggle');
+  if (priorToggle && priorToggle.checked) {
+    var priorTxt = document.getElementById('prior-work-text').value.trim();
+    if (priorTxt) fd.append('prior_work_context', priorTxt);
   }
 
   document.getElementById('submit-btn').disabled = true;
@@ -1551,6 +1633,7 @@ def submit():
 
     pdf_b64 = None
     brief_text = None
+    prior_work = request.form.get('prior_work_context', '')
 
     if 'brief_pdf' in request.files and request.files['brief_pdf'].filename:
         f = request.files['brief_pdf']
@@ -1560,7 +1643,7 @@ def submit():
     else:
         return jsonify({'error': 'Please upload a PDF or paste the brief text.'}), 400
 
-    t = threading.Thread(target=run_pipeline, args=(job_id, pdf_b64, brief_text), daemon=True)
+    t = threading.Thread(target=run_pipeline, args=(job_id, pdf_b64, brief_text, prior_work), daemon=True)
     t.start()
 
     return jsonify({'job_id': job_id})

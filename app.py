@@ -6,6 +6,7 @@ Hosted Flask app for LawLiss / 20.20
 import os, json, uuid, threading, queue, time, base64, re, copy, zipfile, tempfile, shutil
 import anthropic
 from flask import Flask, request, jsonify, send_file, Response
+from pptx_builder import build_pptx_clean
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 20 * 1024 * 1024  # 20MB max upload
@@ -785,17 +786,20 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None):
         progress('All sections written', 85)
 
         # ── STEP 4: BUILD PPTX ───────────────────────────────────────────────
-        progress('Building PowerPoint from template...', 88)
+        progress('Building PowerPoint...', 88)
         try:
-            pptx_path, tmpdir = build_pptx(sections, meta)
+            import tempfile
+            pptx_dir = tempfile.mkdtemp(prefix='2020_out_')
+            pptx_path = os.path.join(pptx_dir, 'proposal.pptx')
+            build_pptx_clean(sections, meta, pptx_path)
             if not os.path.exists(pptx_path):
-                raise FileNotFoundError('Output PPTX was not created')
+                raise FileNotFoundError('PowerPoint was not created')
             update_job(job_id, pptx_path=pptx_path, status='done')
             progress('Done — click Download PowerPoint', 100)
         except Exception as pptx_err:
             import traceback
             err_detail = traceback.format_exc()
-            update_job(job_id, status='done', pptx_error=str(pptx_err), pptx_traceback=err_detail)
+            update_job(job_id, status='done', pptx_error=str(pptx_err), pptx_traceback=err_detail[-500:])
             progress(f'Sections complete. PowerPoint failed: {pptx_err}', 100)
 
     except Exception as e:
@@ -1456,7 +1460,10 @@ def rebuild():
         return jsonify({'error': 'No sections provided'}), 400
 
     try:
-        pptx_path, _tmpdir = build_pptx(sections, meta)
+        import tempfile
+        pptx_dir = tempfile.mkdtemp(prefix='2020_out_')
+        pptx_path = os.path.join(pptx_dir, 'proposal.pptx')
+        build_pptx_clean(sections, meta, pptx_path)
         if job_id:
             update_job(job_id, pptx_path=pptx_path, status='done', pptx_error=None)
         return jsonify({'status': 'ok', 'job_id': job_id})

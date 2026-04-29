@@ -81,6 +81,9 @@ def _parse(txt):
 
 def _prose(txt, n=4):
     parts = [c for t,c in _parse(txt) if t=='prose']
+    # Drop any line that is clearly a stage/phase header Claude added
+    parts = [p for p in parts if not re.search(
+        r'(stage|phase)\s+\d.*?(riba|week|\|)', p, re.I)]
     text = ' '.join(parts)
     return ' '.join(re.split(r'(?<=[.!?])\s+', text)[:n]).strip()
 
@@ -334,14 +337,30 @@ def slide_brief(prs, body, accent):
     _rule(slide, Inches(0.5), Inches(0.92), W-Inches(1.0))
     _heading(slide, 'Our understanding', y=Inches(0.96), size=26)
     _rule(slide, Inches(0.5), Inches(1.68), W-Inches(1.0))
-    prose = [(t,c) for t,c in _parse(body) if t=='prose' and not _is_heading_line(c)]
-    bullets = [(t,c) for t,c in _parse(body) if t=='bullet']
-    if bullets:
-        _textbox(slide, prose, Inches(0.5), Inches(1.76), Inches(5.9), Inches(5.3), size=12.5)
+
+    all_items = [(t,c) for t,c in _parse(body)
+                 if not _is_heading_line(c) and len(c) > 10]
+    prose_items  = [(t,c) for t,c in all_items if t == 'prose']
+    bullet_items = [(t,c) for t,c in all_items if t == 'bullet']
+
+    # Always use two columns when we have enough content
+    # Left: first 3 prose paragraphs
+    # Right: remaining prose as bullets + any explicit bullets
+    left_prose = prose_items[:3]
+    right_prose = [('bullet', c) for t,c in prose_items[3:]]
+    right_bullets = bullet_items[:8]
+    right_items = right_prose + right_bullets
+
+    if right_items:
+        _textbox(slide, left_prose, Inches(0.5), Inches(1.76),
+                 Inches(5.9), Inches(5.3), size=12)
         _box(slide, Inches(6.55), Inches(1.76), Inches(0.01), Inches(5.0), RULE)
-        _textbox(slide, bullets, Inches(6.7), Inches(1.76), Inches(6.0), Inches(5.3), size=11.5)
+        _textbox(slide, right_items, Inches(6.7), Inches(1.76),
+                 Inches(6.0), Inches(5.3), size=11.5)
     else:
-        _textbox(slide, prose, Inches(0.5), Inches(1.76), W-Inches(1.0), Inches(5.3), size=12.5)
+        # Short brief — single column, max 4 paragraphs
+        _textbox(slide, left_prose[:4], Inches(0.5), Inches(1.76),
+                 W-Inches(1.0), Inches(5.3), size=12.5)
     _footer(slide)
 
 
@@ -709,17 +728,28 @@ def build_pptx_clean(sections, meta, output_path):
     # 5. Process summary
     slide_process_summary(prs, active_stages, accent)
 
-    # 6-N. Stage detail slides
-    stage_section_map = [
-        (1, 'stage 1','strategic framework','Stage 1 — Strategic framework'),
-        (2, 'stage 2','concept design',     'Stage 2 — Concept design'),
-        (3, 'stage 3','design development', 'Stage 3 — Design development'),
-        (4, 'stages 4','design intent',      'Stages 4, 5 and 6'),
-    ]
+    # 6-N. Stage detail slides — labels adapt to brief type (RIBA stages vs phases)
+    if is_riba:
+        stage_section_map = [
+            (1, 'stage 1','strategic framework', 'Stage 1 — Strategic framework'),
+            (2, 'stage 2','concept design',      'Stage 2 — Concept design'),
+            (3, 'stage 3','design development',  'Stage 3 — Design development'),
+            (4, 'stages 4','design intent',
+             'Stages 4, 5 and 6' if all(n in stage_nums for n in [4,5,6]) else
+             'Stage 4 — Design intent and artwork'),
+        ]
+    else:
+        stage_section_map = [
+            (1, 'stage 1','discovery',   'Phase 1 — Discovery and strategy'),
+            (2, 'stage 2','concept',     'Phase 2 — Concept design'),
+            (3, 'stage 3','development', 'Phase 3 — Design development'),
+            (4, 'stage 4','production',  'Phase 4 — Production and delivery'),
+        ]
     for num, k1, k2, label in stage_section_map:
-        if num in stage_nums or (num==4 and any(n>=4 for n in stage_nums)):
-            txt = find_section(sections, k1, k2)
-            slide_stage_detail(prs, 'Our methodology', label, txt, accent)
+        if num in stage_nums:
+            txt = find_section(sections, k1, k2, 'stage '+str(num))
+            if txt:
+                slide_stage_detail(prs, 'Our methodology', label, txt, accent)
 
     # Fees
     fees_stages = [

@@ -610,28 +610,37 @@ PLACEHOLDERS: [FEE: TBC — rate card required] for fees, [IMAGE REQUIRED: descr
 
 # Stage prompt template — generates structured content with four named sections
 # Works for both RIBA-staged and phase-based proposals
-STAGE_PROMPT = """Write the {stage_name} section for this 20.20 hospitality design proposal.
-Structure your response using exactly these four labels on their own lines:
+STAGE_PROMPT = """Write the {stage_name} section for this 20.20 proposal.
+
+THIS IS CRITICAL: Write specifically to THIS brief, not generically about hospitality design.
+Reference the actual spaces listed. Reference the actual tiers (Bronze, Silver, Gold, VVIP).
+Reference the specific brief requirements, constraints and programme.
+If there is a lead concept space model or specific design approach requested, reflect that.
+If certain things are fixed (seat positions, lounge sizes, kitchen layouts), acknowledge those constraints.
+
+Structure your response with exactly these four labelled sections:
 
 Objective:
-[1-2 sentences on what this stage achieves commercially and creatively]
+[1-2 sentences on what this stage achieves for THIS project — reference the specific venue, spaces or tiers]
 
 Process:
-[3-5 bullet points — how we work through this stage step by step]
+[4-6 bullet points — how we work through this stage. Reference the specific spaces, tiers and design team context where relevant. Include sub-stages if the RIBA stages have sub-divisions e.g. 2.1, 2.2, 2.3]
 
 Deliverables:
-[5-8 bullet points — specific tangible outputs the client receives]
+[6-10 bullet points — specific outputs. If there are named spaces, reference them. If there is a per-tier delivery model, reflect it. Include the number of CGI renders if concept stage]
 
 Meetings & Presentations:
-[2-4 bullet points — review meetings, client presentations, sign-off points]
+[3-5 bullet points — specific meetings with the design team, architect and client. Reference Teams or in-person based on what the brief says]
 
-Important:
-- Use "the club", "the venue", "the project" or "the space" — never the client name
-- Keep each bullet to one clear line
-- No em dashes
-- If this is not a RIBA-staged project, use plain language (not RIBA references)
+Rules:
+- Write to THIS brief. No generic hospitality boilerplate.
+- Use "the club", "the venue", "the project" — not the client name
+- Reference specific spaces and tiers from the brief
+- No em dashes. Short sentences. Active voice.
+- If RIBA stages have sub-divisions (2.1, 2.2 etc), structure the response around them
 
 {ctx}"""
+
 
 SECTIONS = [
         ('cover',   'Cover letter',
@@ -701,38 +710,50 @@ def build_context(meta, spaces_text=''):
     riba = meta.get('riba_stages','')
     continuation = meta.get('continuation','no')
     prior = meta.get('prior_stages_completed','')
-    preferences = meta.get('key_preferences','')
-    constraints = meta.get('key_constraints','')
     second = meta.get('second_contact','')
 
-    stage_context = f"RIBA STAGES: {riba}" if riba and 'riba' in riba.lower() else (
-        f"STAGES/PHASES: {riba}" if riba else "STAGES: To be confirmed with client"
-    )
-    contact_line = meta.get('contact','')
-    if meta.get('role'):
-        contact_line += f", {meta['role']}"
-    if second:
-        contact_line += f" and {second}"
+    # Stage context line
+    if riba:
+        stage_ctx = f"RIBA STAGES REQUESTED: {riba}"
+        if meta.get('stage_2_duration'): stage_ctx += f" | Stage 2: {meta['stage_2_duration']}"
+        if meta.get('stage_3_duration'): stage_ctx += f" | Stage 3: {meta['stage_3_duration']}"
+    else:
+        stage_ctx = f"STAGES/PHASES: {riba or 'To be confirmed'}"
 
-    ctx = (
-        f"PROJECT: {meta.get('venue','')}\n"
-        f"CONTACT: {contact_line}\n"
-        f"BRIEF TYPE: {bt}\n"
-        f"CONTINUATION OF PRIOR WORK: {continuation.upper()}\n"
-    )
-    if prior:
-        ctx += f"PRIOR STAGES COMPLETED: {prior}\n"
-    ctx += (
-        f"{stage_context}\n"
-        f"BUDGET: {meta.get('budget','Not stated')}\n"
-        f"SPACES:\n{spaces_text or meta.get('scope','See scope summary')}\n"
-        f"SCOPE: {meta.get('scope','')}\n"
-    )
-    if preferences:
-        ctx += f"CLIENT PREFERENCES/DISLIKES FROM BRIEF: {preferences}\n"
-    if constraints:
-        ctx += f"KEY CONSTRAINTS: {constraints}\n"
+    contact_line = meta.get('contact','')
+    if meta.get('role'): contact_line += f", {meta['role']}"
+    if second: contact_line += f" and {second}"
+
+    ctx = f"PROJECT: {meta.get('venue','')}\n"
+    ctx += f"CLIENT: {meta.get('client','')}\n"
+    ctx += f"CONTACT: {contact_line}\n"
+    if meta.get('lead_architect'): ctx += f"LEAD ARCHITECT/DESIGN TEAM: {meta['lead_architect']}\n"
+    if meta.get('project_manager'): ctx += f"PROJECT MANAGER: {meta['project_manager']}\n"
+    ctx += f"BRIEF TYPE: {bt}\n"
+    ctx += f"CONTINUATION OF PRIOR WORK: {continuation.upper()}\n"
+    if prior: ctx += f"PRIOR STAGES / CONTEXT: {prior}\n"
+    ctx += f"{stage_ctx}\n"
+    ctx += f"BUDGET: {meta.get('budget','Not stated')}\n"
+    if meta.get('tier_summary'): ctx += f"HOSPITALITY TIERS: {meta['tier_summary']}\n"
+
+    # Spaces
+    if spaces_text:
+        ctx += f"SPACES:\n{spaces_text}\n"
+    elif meta.get('scope'):
+        ctx += f"SCOPE: {meta['scope']}\n"
+
+    # Key brief content
+    if meta.get('key_requirements'):
+        ctx += f"\nKEY REQUIREMENTS FROM THE BRIEF:\n{meta['key_requirements']}\n"
+    if meta.get('key_constraints'):
+        ctx += f"\nCONSTRAINTS (fixed elements, things NOT to change):\n{meta['key_constraints']}\n"
+    if meta.get('client_dislikes'):
+        ctx += f"\nCLIENT DISLIKES/AVOIDED APPROACHES:\n{meta['client_dislikes']}\n"
+    if meta.get('design_approach'):
+        ctx += f"\nSPECIFIC DESIGN APPROACH REQUESTED:\n{meta['design_approach']}\n"
+
     return ctx.strip()
+
 
 def strip_html(txt):
     """Strip HTML tags from text — intel comes back with <cite> tags from web search."""
@@ -754,16 +775,33 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
         # ── STEP 1: EXTRACT ─────────────────────────────────────────────────
         progress('Reading the brief...', 5)
         extract_prompt = (
-            'Read this client brief carefully. Extract all structured data and return ONLY valid JSON with NO markdown:\n'
-            '{"brief_type":"newbuild|refurb|single_space|sponsor|arena|continuation","continuation":"yes|no",'
-            '"client":"","venue":"","primary_contact":"","contact_role":"",'
-            '"second_contact":"","proposal_deadline":"","completion_target":"","budget_stated":"",'
-            '"riba_stages":"","spaces":[{"name":"","tier":"","capacity":"","size":"","budget":"","current_issues":""}],'
-            '"payback_target":"","prior_stages_completed":"",'
-            '"brief_source":"Direct approach|Via architect or PM|Formal tender (ITT)|Referral|Repeat client|Unknown",'
-            '"scope_summary":"2-3 sentences describing the full scope exactly as stated",'
-            '"key_preferences":"specific likes, dislikes, named references from brief",'
-            '"key_constraints":"timeline, budget, operational constraints"}'
+            'Read this client brief, ITT or scope document carefully. Extract ALL available information. Return ONLY valid JSON with NO markdown or explanation.\n'
+            '{\n'
+            '"brief_type": "newbuild | refurb | single_space | sponsor | arena | continuation | itt",\n'
+            '"brief_source": "Direct approach | Via architect or PM | Formal open tender (ITT) | Referral | Repeat client | Unknown",\n'
+            '"continuation": "yes | no",\n'
+            '"client": "",\n'
+            '"venue": "",\n'
+            '"primary_contact": "",\n'
+            '"contact_role": "",\n'
+            '"second_contact": "",\n'
+            '"lead_architect": "name of lead architect or design team lead if mentioned",\n'
+            '"project_manager": "name of PM or client representative if mentioned",\n'
+            '"proposal_deadline": "",\n'
+            '"construction_completion": "",\n'
+            '"budget_stated": "",\n'
+            '"riba_stages": "exact RIBA stages requested e.g. Stage 2 and 3, or 2.1 2.2 2.3 — be precise",\n'
+            '"stage_2_duration": "weeks if stated",\n'
+            '"stage_3_duration": "weeks if stated",\n'
+            '"prior_stages_completed": "any stages already completed e.g. Stage 3 design rejected",\n'
+            '"spaces": [{"name": "", "tier": "Bronze|Silver|Gold|VVIP|GA|GA+", "level": "", "capacity": "", "budget": "", "notes": "specific requirements or constraints for this space"}],\n'
+            '"tier_summary": "e.g. Gold 1372 seats, Silver 642, Bronze 2566",\n'
+            '"key_requirements": "verbatim or near-verbatim key design requirements from the brief",\n'
+            '"key_constraints": "fixed elements, things not to change, operational constraints",\n'
+            '"client_dislikes": "anything client has said they do not want",\n'
+            '"design_approach": "any specific approach the brief requests e.g. lead concept space model",\n'
+            '"scope_summary": "2-3 sentences describing the full scope precisely as stated"\n'
+            '}'
         )
 
         if pdf_b64:
@@ -792,23 +830,35 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
             'contact':               ex.get('primary_contact', ''),
             'role':                  ex.get('contact_role', ''),
             'second_contact':        ex.get('second_contact', ''),
+            'lead_architect':        ex.get('lead_architect', ''),
+            'project_manager':       ex.get('project_manager', ''),
             'brief_type':            ex.get('brief_type', ''),
             'continuation':          ex.get('continuation', 'no'),
             'prior_stages_completed':ex.get('prior_stages_completed', ''),
             'riba_stages':           ex.get('riba_stages', ''),
+            'stage_2_duration':      ex.get('stage_2_duration', ''),
+            'stage_3_duration':      ex.get('stage_3_duration', ''),
             'budget':                ex.get('budget_stated', ''),
+            'tier_summary':          ex.get('tier_summary', ''),
             'scope':                 ex.get('scope_summary', ''),
-            'key_preferences':       ex.get('key_preferences', ''),
+            'key_requirements':      ex.get('key_requirements', ''),
             'key_constraints':       ex.get('key_constraints', ''),
+            'key_preferences':       ex.get('key_preferences', ex.get('key_requirements', '')),
+            'client_dislikes':       ex.get('client_dislikes', ''),
+            'design_approach':       ex.get('design_approach', ''),
             'date':                  time.strftime('%-d %B %Y'),
         }
         update_job(job_id, meta=meta)
+        raw_spaces = ex.get('spaces', [])
         spaces_text = '\n'.join(
-            f"- {s['name']}" + (f" ({s['tier']})" if s.get('tier') else '') +
-            (f", {s['size']}" if s.get('size') else '') +
-            (f", {s['budget']}" if s.get('budget') else '')
-            for s in ex.get('spaces', [])
-        ) or 'Not listed'
+            f"- {s.get('name','?')}"
+            + (f" | {s.get('tier','')}" if s.get('tier') else '')
+            + (f" | Level {s.get('level','')}" if s.get('level') else '')
+            + (f" | Capacity {s.get('capacity','')}" if s.get('capacity') else '')
+            + (f" | Budget {s.get('budget','')}" if s.get('budget') else '')
+            + (f" — {s.get('notes','')}" if s.get('notes') else '')
+            for s in raw_spaces
+        ) or meta.get('scope', 'Not listed')
 
         # Inject prior work context if provided
         if prior_work:

@@ -1,704 +1,652 @@
 """
-20.20 Proposal PPTX Builder — python-pptx version
-Builds a clean branded deck matching real 20.20 proposal layouts.
-Uses python-pptx throughout — no XML hacking.
+20.20 Proposal PPTX Builder — python-pptx version 2
+Clean builds matching real 20.20 proposal layouts.
 """
 
 from pptx import Presentation
-from pptx.util import Inches, Pt, Emu
+from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
-from pptx.util import Inches, Pt
-import re, os
+import re
 
-# ── DIMENSIONS ────────────────────────────────────────────────────────────────
-W = Inches(13.33)   # widescreen 16:9
+W = Inches(13.33)
 H = Inches(7.5)
 
-# ── PALETTE ───────────────────────────────────────────────────────────────────
-WHITE  = RGBColor(0xFF, 0xFF, 0xFF)
-BLACK  = RGBColor(0x1A, 0x1A, 0x1A)
-DARK   = RGBColor(0x11, 0x14, 0x18)   # near-black cover bg
-MID    = RGBColor(0x2D, 0x2D, 0x2D)   # body text
-GREY   = RGBColor(0x88, 0x88, 0x88)   # secondary / footer
-LGREY  = RGBColor(0xF2, 0xF1, 0xEE)   # light bg
-RULE   = RGBColor(0xDD, 0xDB, 0xD5)   # divider lines
-DEFAULT_ACCENT = RGBColor(0xE9, 0x71, 0x32)  # 20.20 orange
+WHITE  = RGBColor(0xFF,0xFF,0xFF)
+BLACK  = RGBColor(0x1A,0x1A,0x1A)
+DARK   = RGBColor(0x11,0x14,0x18)
+MID    = RGBColor(0x2D,0x2D,0x2D)
+GREY   = RGBColor(0x88,0x88,0x88)
+LGREY  = RGBColor(0xF2,0xF1,0xEE)
+RULE   = RGBColor(0xDD,0xDB,0xD5)
+DEFAULT_ACCENT = RGBColor(0xE9,0x71,0x32)
 
-# ── FONTS ─────────────────────────────────────────────────────────────────────
-# Filson Pro is 20.20's licensed font — falls back to system fonts on machines
-# that don't have it. We embed the name so PowerPoint uses it when available.
-F_HEAD  = 'Filson Pro Heavy'    # headings
-F_BODY  = 'Filson Pro'          # body text
-F_FALL  = 'Arial'               # fallback
+F_HEAD = 'Filson Pro Heavy'
+F_BODY = 'Filson Pro'
 
-def _accent(client_name):
-    """Return accent RGBColor for client, falling back to 20.20 orange."""
-    COLOURS = {
-        'aston villa': (0x5C, 0x1A, 0x2E), 'villa': (0x5C, 0x1A, 0x2E),
-        'newcastle': (0xC9, 0xA8, 0x4C), 'nufc': (0xC9, 0xA8, 0x4C),
-        'brighton': (0x00, 0x57, 0xB8), 'bhafc': (0x00, 0x57, 0xB8),
-        'arsenal': (0xEF, 0x01, 0x07),
-        'liverpool': (0xC8, 0x10, 0x2E),
-        'chelsea': (0x03, 0x46, 0x94),
-        'crystal palace': (0x1B, 0x45, 0x8F), 'cpfc': (0x1B, 0x45, 0x8F),
-        'leeds': (0xFF, 0xCD, 0x00), 'lufc': (0xFF, 0xCD, 0x00),
-        'sunderland': (0xEB, 0x17, 0x2B), 'safc': (0xEB, 0x17, 0x2B),
-        'west ham': (0x7A, 0x26, 0x3A),
-        'manchester city': (0x6C, 0xAB, 0xDD), 'man city': (0x6C, 0xAB, 0xDD),
-        'manchester united': (0xDA, 0x29, 0x1C), 'man utd': (0xDA, 0x29, 0x1C),
-        'tottenham': (0x13, 0x22, 0x57), 'spurs': (0x13, 0x22, 0x57),
-        'luton': (0xF7, 0x83, 0x1A), 'luton town': (0xF7, 0x83, 0x1A),
-        'sheffield': (0xEE, 0x27, 0x37),
-        'nottingham': (0xE5, 0x32, 0x33),
-        'wolverhampton': (0xFD, 0xB9, 0x13), 'wolves': (0xFD, 0xB9, 0x13),
-    }
-    cl = (client_name or '').lower()
-    for key, rgb in COLOURS.items():
-        if key in cl:
-            return RGBColor(*rgb)
+CLUB_COLOURS = {
+    'aston villa':(0x5C,0x1A,0x2E),'villa':(0x5C,0x1A,0x2E),
+    'newcastle':(0xC9,0xA8,0x4C),'nufc':(0xC9,0xA8,0x4C),
+    'brighton':(0x00,0x57,0xB8),'bhafc':(0x00,0x57,0xB8),
+    'arsenal':(0xEF,0x01,0x07),'liverpool':(0xC8,0x10,0x2E),
+    'chelsea':(0x03,0x46,0x94),'crystal palace':(0x1B,0x45,0x8F),
+    'cpfc':(0x1B,0x45,0x8F),'leeds':(0xFF,0xCD,0x00),'lufc':(0xFF,0xCD,0x00),
+    'sunderland':(0xEB,0x17,0x2B),'safc':(0xEB,0x17,0x2B),
+    'west ham':(0x7A,0x26,0x3A),'manchester city':(0x6C,0xAB,0xDD),
+    'man city':(0x6C,0xAB,0xDD),'manchester united':(0xDA,0x29,0x1C),
+    'man utd':(0xDA,0x29,0x1C),'tottenham':(0x13,0x22,0x57),
+    'spurs':(0x13,0x22,0x57),'luton':(0xF7,0x83,0x1A),
+    'luton town':(0xF7,0x83,0x1A),'sheffield':(0xEE,0x27,0x37),
+    'nottingham':(0xE5,0x32,0x33),'wolves':(0xFD,0xB9,0x13),
+    'wolverhampton':(0xFD,0xB9,0x13),'everton':(0x00,0x33,0x99),
+    'celtic':(0x00,0x84,0x3D),'rangers':(0x00,0x33,0xA0),
+}
+
+def _accent(name):
+    cl = (name or '').lower()
+    for k,v in CLUB_COLOURS.items():
+        if k in cl: return RGBColor(*v)
     return DEFAULT_ACCENT
 
+def _clean(t):
+    if not t: return ''
+    t = re.sub(r'\*\*([^*]+)\*\*',r'\1',t)
+    t = re.sub(r'\*([^*]+)\*',r'\1',t)
+    t = re.sub(r'^#{1,3}\s*','',t,flags=re.MULTILINE)
+    t = re.sub(r'\n{3,}','\n\n',t)
+    return t.strip()
 
-# ── TEXT HELPERS ──────────────────────────────────────────────────────────────
-def _clean(txt):
-    if not txt: return ''
-    txt = re.sub(r'\*\*([^*]+)\*\*', r'\1', txt)
-    txt = re.sub(r'\*([^*]+)\*', r'\1', txt)
-    txt = re.sub(r'^#{1,3}\s*', '', txt, flags=re.MULTILINE)
-    txt = re.sub(r'\n{3,}', '\n\n', txt)
-    return txt.strip()
+def _is_heading_line(s):
+    """True if this line is a section label Claude added, not real content."""
+    if len(s) > 60: return False
+    if '.' in s or ',' in s: return False
+    if re.search(r'stage \d|riba|objective|process|deliverable|meetings|presentations|your brief|cover letter|our approach|next steps|fees and timing', s, re.I):
+        return True
+    return False
 
-def _paragraphs(txt):
-    """Split text into (type, content) tuples: 'bullet' or 'prose'."""
-    result = []
+def _parse(txt):
+    """Return list of (type, text): 'prose', 'bullet', 'heading'."""
+    out = []
     for line in _clean(txt).split('\n'):
         s = line.strip()
-        if not s:
-            continue
-        # Skip internal headings Claude adds
-        if re.match(r'^(stage \d|riba|your brief|cover letter|our approach|next steps|fees)', s, re.I) and '.' not in s:
-            continue
-        if s.startswith(('-', '\u2022', '*')):
-            result.append(('bullet', re.sub(r'^[-\u2022*]\s*', '', s)))
-        elif re.match(r'^\d+[.):]', s):
-            result.append(('bullet', re.sub(r'^\d+[.):]\s*', '', s)))
+        if not s: continue
+        if s.startswith(('-','\u2022','*')) or re.match(r'^\d+[.):]',s):
+            item = re.sub(r'^[-\u2022*]\s*|^\d+[.):]\s*','',s)
+            if len(item) > 5: out.append(('bullet', item))
+        elif _is_heading_line(s):
+            out.append(('heading', s))
         else:
-            result.append(('prose', s))
-    return result
+            out.append(('prose', s))
+    return out
 
-def _get_prose(txt, max_sentences=3):
-    paras = [c for t, c in _paragraphs(txt) if t == 'prose']
-    text = ' '.join(paras)
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    return ' '.join(sentences[:max_sentences]).strip()
+def _prose(txt, n=4):
+    parts = [c for t,c in _parse(txt) if t=='prose']
+    text = ' '.join(parts)
+    return ' '.join(re.split(r'(?<=[.!?])\s+', text)[:n]).strip()
 
-def _get_bullets(txt, max_n=8):
-    bullets = [c for t, c in _paragraphs(txt) if t == 'bullet']
-    if not bullets:
-        bullets = [c for t, c in _paragraphs(txt) if t == 'prose' and len(c) > 20]
-    return bullets[:max_n]
+def _bullets(txt, n=8):
+    b = [c for t,c in _parse(txt) if t=='bullet']
+    if not b:
+        b = [c for t,c in _parse(txt) if t=='prose' and len(c)>20]
+    return b[:n]
 
+def _section_of(txt, label):
+    """Extract a named sub-section from structured text."""
+    pattern = re.compile(
+        r'(?:^|\n)\s*' + re.escape(label) + r'[:\s]*\n(.*?)(?=\n\s*(?:Objective|Process|Deliverables|Meetings|$))',
+        re.IGNORECASE | re.DOTALL
+    )
+    m = pattern.search(txt)
+    if m:
+        return m.group(1).strip()
+    return ''
 
-# ── DRAWING HELPERS ───────────────────────────────────────────────────────────
+# ── DRAWING PRIMITIVES ────────────────────────────────────────────────────────
+
 def _bg(slide, colour):
-    """Fill slide background with solid colour."""
-    from pptx.oxml.ns import qn
-    from lxml import etree
-    bg = slide.background
-    fill = bg.fill
+    fill = slide.background.fill
     fill.solid()
     fill.fore_color.rgb = colour
 
-def _rect(slide, x, y, w, h, colour, alpha=None):
-    """Add a filled rectangle."""
-    shape = slide.shapes.add_shape(
-        1,  # MSO_SHAPE_TYPE.RECTANGLE
-        x, y, w, h
-    )
-    shape.fill.solid()
-    shape.fill.fore_color.rgb = colour
-    shape.line.fill.background()
-    return shape
+def _box(slide, x, y, w, h, colour):
+    s = slide.shapes.add_shape(1, x, y, w, h)
+    s.fill.solid(); s.fill.fore_color.rgb = colour
+    s.line.fill.background()
+    return s
 
-def _line(slide, x, y, w, colour=None):
-    """Add a thin horizontal rule."""
-    c = colour or RULE
-    shape = slide.shapes.add_shape(1, x, y, w, Pt(1))
-    shape.fill.solid()
-    shape.fill.fore_color.rgb = c
-    shape.line.fill.background()
+def _rule(slide, x, y, w, colour=None):
+    s = slide.shapes.add_shape(1, x, y, w, Pt(0.75))
+    s.fill.solid(); s.fill.fore_color.rgb = colour or RULE
+    s.line.fill.background()
 
 def _logo(slide, dark=False):
-    """Add 20.20 logo text top right."""
-    tb = slide.shapes.add_textbox(W - Inches(0.9), Inches(0.15), Inches(0.75), Inches(0.6))
+    c = WHITE if dark else BLACK
+    tb = slide.shapes.add_textbox(W-Inches(0.88), Inches(0.12), Inches(0.72), Inches(0.62))
     tf = tb.text_frame
-    tf.word_wrap = False
-    p1 = tf.paragraphs[0]
-    p1.alignment = PP_ALIGN.CENTER
-    run = p1.add_run()
-    run.text = '20'
-    run.font.name = F_HEAD
-    run.font.size = Pt(13)
-    run.font.bold = True
-    run.font.color.rgb = WHITE if dark else BLACK
-
-    p2 = tf.add_paragraph()
-    p2.alignment = PP_ALIGN.CENTER
-    r2 = p2.add_run()
-    r2.text = '20'
-    r2.font.name = F_HEAD
-    r2.font.size = Pt(13)
-    r2.font.bold = True
-    r2.font.color.rgb = WHITE if dark else BLACK
-
-    # Red dot
-    dot = slide.shapes.add_shape(1,
-        W - Inches(0.59), Inches(0.44), Inches(0.09), Inches(0.09))
-    dot.fill.solid()
-    dot.fill.fore_color.rgb = RGBColor(0xE8, 0x25, 0x1A)
+    for i, txt in enumerate(['20','20']):
+        p = tf.paragraphs[0] if i==0 else tf.add_paragraph()
+        p.alignment = PP_ALIGN.CENTER
+        r = p.add_run(); r.text = txt
+        r.font.name = F_HEAD; r.font.size = Pt(13); r.font.bold = True
+        r.font.color.rgb = c
+    dot = slide.shapes.add_shape(1, W-Inches(0.57), Inches(0.43), Inches(0.09), Inches(0.09))
+    dot.fill.solid(); dot.fill.fore_color.rgb = RGBColor(0xE8,0x25,0x1A)
     dot.line.fill.background()
 
-def _section_label(slide, label, accent):
-    """Small uppercase section label top left."""
-    tb = slide.shapes.add_textbox(Inches(0.5), Inches(0.12), Inches(5), Inches(0.22))
-    tf = tb.text_frame
-    p = tf.paragraphs[0]
-    run = p.add_run()
-    run.text = label.upper()
-    run.font.name = F_BODY
-    run.font.size = Pt(8)
-    run.font.bold = True
-    run.font.color.rgb = accent
+def _label(slide, text, accent):
+    tb = slide.shapes.add_textbox(Inches(0.5), Inches(0.12), Inches(6), Inches(0.22))
+    r = tb.text_frame.paragraphs[0].add_run()
+    r.text = text.upper(); r.font.name = F_BODY; r.font.size = Pt(8)
+    r.font.bold = True; r.font.color.rgb = accent
 
 def _footer(slide):
-    """Confidential footer bottom left."""
-    tb = slide.shapes.add_textbox(Inches(0.5), H - Inches(0.3), Inches(9), Inches(0.2))
-    tf = tb.text_frame
-    p = tf.paragraphs[0]
-    run = p.add_run()
-    run.text = 'CONFIDENTIAL  \u00a9  20.20 Limited 2026'
-    run.font.name = F_BODY
-    run.font.size = Pt(7.5)
-    run.font.color.rgb = GREY
+    tb = slide.shapes.add_textbox(Inches(0.5), H-Inches(0.28), Inches(9), Inches(0.2))
+    r = tb.text_frame.paragraphs[0].add_run()
+    r.text = 'CONFIDENTIAL  \u00a9  20.20 Limited 2026'
+    r.font.name = F_BODY; r.font.size = Pt(7.5); r.font.color.rgb = GREY
 
-def _heading(slide, text, x=None, y=None, w=None, size=26, colour=None, bold=True):
-    x = x or Inches(0.5)
-    y = y or Inches(0.28)
-    w = w or (W - Inches(1.2))
-    tb = slide.shapes.add_textbox(x, y, w, Inches(1.0))
-    tf = tb.text_frame
-    tf.word_wrap = True
+def _heading(slide, text, x=None, y=None, w=None, size=26, colour=None, caps=True):
+    tb = slide.shapes.add_textbox(x or Inches(0.5), y or Inches(0.28),
+                                   w or (W-Inches(1.2)), Inches(0.9))
+    tf = tb.text_frame; tf.word_wrap = True
     p = tf.paragraphs[0]
-    p.alignment = PP_ALIGN.LEFT
-    run = p.add_run()
-    run.text = text.upper() if bold else text
-    run.font.name = F_HEAD
-    run.font.size = Pt(size)
-    run.font.bold = bold
-    run.font.color.rgb = colour or BLACK
-    return tb
+    r = p.add_run()
+    r.text = text.upper() if caps else text
+    r.font.name = F_HEAD; r.font.size = Pt(size)
+    r.font.bold = True; r.font.color.rgb = colour or BLACK
 
-def _body_text(slide, paragraphs_data, x, y, w, h, size=12.5):
-    """
-    Add a text box with mixed prose and bullets.
-    paragraphs_data: list of (type, text) — type is 'prose', 'bullet', or 'spacer'
-    """
+def _textbox(slide, paras, x, y, w, h, size=12, colour=None):
+    """paras: list of (type, text) — 'prose', 'bullet', 'bold'"""
     tb = slide.shapes.add_textbox(x, y, w, h)
-    tf = tb.text_frame
-    tf.word_wrap = True
+    tf = tb.text_frame; tf.word_wrap = True
     first = True
-    for typ, text in paragraphs_data:
-        if first:
-            p = tf.paragraphs[0]
-            first = False
-        else:
-            p = tf.add_paragraph()
-        if typ == 'spacer':
-            p.space_after = Pt(4)
-            continue
+    for typ, text in paras:
+        if not text.strip(): continue
+        p = tf.paragraphs[0] if first else tf.add_paragraph()
+        first = False
         if typ == 'bullet':
             from pptx.oxml.ns import qn
             from lxml import etree
-            pPr = p._pPr if p._pPr is not None else p._p.get_or_add_pPr()
-            buNone = pPr.find(qn('a:buNone'))
-            if buNone is not None:
-                pPr.remove(buNone)
-            buChar = etree.SubElement(pPr, qn('a:buChar'))
-            buChar.set('char', '\u2022')
-            p.space_before = Pt(2)
-        run = p.add_run()
-        run.text = text
-        run.font.name = F_BODY
-        run.font.size = Pt(size)
-        run.font.color.rgb = MID
-        if typ == 'prose':
-            p.space_after = Pt(6)
-    return tb
+            pPr = p._p.get_or_add_pPr()
+            bc = etree.SubElement(pPr, qn('a:buChar'))
+            bc.set('char', '\u2022')
+            p.space_before = Pt(1)
+        elif typ == 'prose':
+            p.space_after = Pt(5)
+        r = p.add_run(); r.text = text
+        r.font.name = F_BODY; r.font.size = Pt(size)
+        r.font.bold = (typ == 'bold')
+        r.font.color.rgb = colour or MID
+
+def _col_text(slide, items, x, y, w, h, size=11.5, heading=None, accent=None):
+    """Column with optional coloured heading then bullets/prose."""
+    cy = y
+    if heading:
+        tb = slide.shapes.add_textbox(x, cy, w, Inches(0.28))
+        r = tb.text_frame.paragraphs[0].add_run()
+        r.text = heading; r.font.name = F_HEAD; r.font.size = Pt(11)
+        r.font.bold = True; r.font.color.rgb = accent or BLACK
+        cy += Inches(0.3)
+    _textbox(slide, items, x, cy, w, h - (Inches(0.3) if heading else 0), size)
 
 
-# ── SLIDE BUILDERS ────────────────────────────────────────────────────────────
+# ── SLIDES ────────────────────────────────────────────────────────────────────
 
 def slide_cover(prs, venue, client, contact, role, date_s, accent):
-    """Slide 1: Dark cover with image placeholder."""
-    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
     _bg(slide, DARK)
+    _box(slide, Inches(6.5), 0, Inches(6.83), H, RGBColor(0x1A,0x1E,0x24))
+    tb = slide.shapes.add_textbox(Inches(7.0), Inches(0.2), Inches(5.8), H-Inches(0.4))
+    r = tb.text_frame.paragraphs[0].add_run()
+    r.text = '[IMAGE: Full-bleed stadium or hospitality photography — atmospheric, premium, on-brand]'
+    r.font.name = F_BODY; r.font.size = Pt(9); r.font.color.rgb = RGBColor(0x44,0x44,0x44)
 
-    # Image placeholder directive (right half)
-    tb_img = slide.shapes.add_textbox(Inches(6.5), Inches(0), Inches(6.83), H)
-    tf = tb_img.text_frame
-    p = tf.paragraphs[0]
-    p.alignment = PP_ALIGN.CENTER
-    run = p.add_run()
-    run.text = '[IMAGE: Full-bleed stadium or hospitality photography — atmospheric, premium, on-brand]'
-    run.font.name = F_BODY
-    run.font.size = Pt(9)
-    run.font.color.rgb = RGBColor(0x44, 0x44, 0x44)
+    # 20.20 mark
+    tb2 = slide.shapes.add_textbox(Inches(0.5), Inches(0.35), Inches(1.5), Inches(0.9))
+    tf2 = tb2.text_frame
+    for i, t in enumerate(['20','20']):
+        p = tf2.paragraphs[0] if i==0 else tf2.add_paragraph()
+        r2 = p.add_run(); r2.text = t
+        r2.font.name = F_HEAD; r2.font.size = Pt(20)
+        r2.font.bold = True; r2.font.color.rgb = WHITE
 
-    # Left panel content
-    # 20.20 logo
-    logo_tb = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), Inches(1.2), Inches(0.8))
-    tf2 = logo_tb.text_frame
-    p2 = tf2.paragraphs[0]
-    r2 = p2.add_run()
-    r2.text = '20\n20'
-    r2.font.name = F_HEAD
-    r2.font.size = Pt(18)
-    r2.font.bold = True
-    r2.font.color.rgb = WHITE
+    _box(slide, Inches(0.5), Inches(1.45), Inches(0.75), Inches(0.05), accent)
 
-    # Accent rule
-    _rect(slide, Inches(0.5), Inches(1.4), Inches(0.6), Inches(0.04), accent)
+    tb3 = slide.shapes.add_textbox(Inches(0.5), Inches(1.6), Inches(5.7), Inches(1.4))
+    tf3 = tb3.text_frame; tf3.word_wrap = True
+    r3 = tf3.paragraphs[0].add_run()
+    r3.text = venue; r3.font.name = F_HEAD; r3.font.size = Pt(38)
+    r3.font.bold = True; r3.font.color.rgb = WHITE
 
-    # Project name
-    tb_v = slide.shapes.add_textbox(Inches(0.5), Inches(1.55), Inches(5.5), Inches(1.2))
-    tf_v = tb_v.text_frame
-    tf_v.word_wrap = True
-    p_v = tf_v.paragraphs[0]
-    r_v = p_v.add_run()
-    r_v.text = venue
-    r_v.font.name = F_HEAD
-    r_v.font.size = Pt(36)
-    r_v.font.bold = True
-    r_v.font.color.rgb = WHITE
+    tb4 = slide.shapes.add_textbox(Inches(0.5), Inches(3.1), Inches(5.7), Inches(0.4))
+    r4 = tb4.text_frame.paragraphs[0].add_run()
+    r4.text = 'Hospitality design proposal'
+    r4.font.name = F_BODY; r4.font.size = Pt(14); r4.font.color.rgb = RGBColor(0xCC,0xCC,0xCC)
 
-    # Subtitle
-    tb_sub = slide.shapes.add_textbox(Inches(0.5), Inches(2.9), Inches(5.5), Inches(0.4))
-    tf_sub = tb_sub.text_frame
-    p_sub = tf_sub.paragraphs[0]
-    r_sub = p_sub.add_run()
-    r_sub.text = 'Hospitality design proposal'
-    r_sub.font.name = F_BODY
-    r_sub.font.size = Pt(14)
-    r_sub.font.color.rgb = RGBColor(0xCC, 0xCC, 0xCC)
-
-    # Prepared for
-    tb_pr = slide.shapes.add_textbox(Inches(0.5), H - Inches(1.2), Inches(5.5), Inches(0.8))
-    tf_pr = tb_pr.text_frame
-    p_pr = tf_pr.paragraphs[0]
-    r_pr = p_pr.add_run()
-    r_pr.text = client
-    r_pr.font.name = F_HEAD
-    r_pr.font.size = Pt(13)
-    r_pr.font.bold = True
-    r_pr.font.color.rgb = WHITE
-
-    p_pr2 = tf_pr.add_paragraph()
-    r_pr2 = p_pr2.add_run()
-    r_pr2.text = f'Prepared for {contact}' + (f', {role}' if role else '') + (f'  |  {date_s}' if date_s else '')
-    r_pr2.font.name = F_BODY
-    r_pr2.font.size = Pt(10)
-    r_pr2.font.color.rgb = GREY
+    tb5 = slide.shapes.add_textbox(Inches(0.5), H-Inches(1.3), Inches(5.7), Inches(0.85))
+    tf5 = tb5.text_frame; tf5.word_wrap = True
+    p5a = tf5.paragraphs[0]; r5a = p5a.add_run()
+    r5a.text = client; r5a.font.name = F_HEAD; r5a.font.size = Pt(14)
+    r5a.font.bold = True; r5a.font.color.rgb = WHITE
+    p5b = tf5.add_paragraph(); r5b = p5b.add_run()
+    r5b.text = f'Prepared for {contact}' + (f', {role}' if role else '') + (f'  |  {date_s}' if date_s else '')
+    r5b.font.name = F_BODY; r5b.font.size = Pt(10); r5b.font.color.rgb = GREY
 
 
-def slide_hello(prs, body_text, accent):
-    """Slide 2: INTRODUCTION / HELLO — full text letter."""
+def slide_hello(prs, body, accent):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _bg(slide, WHITE)
-    _logo(slide)
-    _section_label(slide, 'Introduction', accent)
-    _line(slide, Inches(0.5), Inches(0.9), W - Inches(1.0))
-
-    # HELLO heading
-    _heading(slide, 'Hello', y=Inches(0.95), size=28, bold=True)
-    _line(slide, Inches(0.5), Inches(1.62), W - Inches(1.0))
-
-    # Full letter text
-    paras = _paragraphs(body_text)
-    # Filter out heading-like first lines
-    paras = [(t, c) for t, c in paras if not (t == 'prose' and len(c) < 25 and '.' not in c)]
-
-    _body_text(slide, paras, Inches(0.5), Inches(1.7), W - Inches(1.0), Inches(5.0), size=12.5)
+    _bg(slide, WHITE); _logo(slide); _label(slide, 'Introduction', accent)
+    _rule(slide, Inches(0.5), Inches(0.92), W-Inches(1.0))
+    _heading(slide, 'Hello', y=Inches(0.96), size=28)
+    _rule(slide, Inches(0.5), Inches(1.68), W-Inches(1.0))
+    paras = [(t,c) for t,c in _parse(body) if not (t=='prose' and len(c)<25 and '.' not in c)]
+    _textbox(slide, paras, Inches(0.5), Inches(1.76), W-Inches(1.0), Inches(5.2), size=12.5)
     _footer(slide)
 
 
-def slide_brief(prs, body_text, accent):
-    """Slide 3: YOUR BRIEF — full text, left column."""
+def slide_brief(prs, body, accent):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _bg(slide, WHITE)
-    _logo(slide)
-    _section_label(slide, 'Your brief', accent)
-    _line(slide, Inches(0.5), Inches(0.9), W - Inches(1.0))
-    _heading(slide, 'Our understanding', y=Inches(0.95), size=26)
-    _line(slide, Inches(0.5), Inches(1.7), W - Inches(1.0))
-
-    paras = _paragraphs(body_text)
-    paras = [(t, c) for t, c in paras if not (t == 'prose' and len(c) < 30 and '.' not in c)]
-
-    # Left column prose, right column bullets if both exist
-    prose_items = [(t, c) for t, c in paras if t == 'prose']
-    bullet_items = [(t, c) for t, c in paras if t == 'bullet']
-
-    if bullet_items:
-        _body_text(slide, prose_items, Inches(0.5), Inches(1.8), Inches(5.8), Inches(5.0))
-        # Vertical rule
-        _rect(slide, Inches(6.5), Inches(1.8), Inches(0.01), Inches(4.8), RULE)
-        _body_text(slide, bullet_items, Inches(6.65), Inches(1.8), Inches(6.0), Inches(5.0))
-    else:
-        _body_text(slide, prose_items, Inches(0.5), Inches(1.8), W - Inches(1.0), Inches(5.0))
-
-    _footer(slide)
-
-
-def slide_stage(prs, section_label, stage_title, body_text, accent):
-    """Stage slide: section label, bold title, Scope left / Deliverables right, fee bottom right."""
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _bg(slide, WHITE)
-    _logo(slide)
-    _section_label(slide, section_label, accent)
-    _line(slide, Inches(0.5), Inches(0.9), W - Inches(1.0))
-
-    # Title
-    _heading(slide, stage_title, y=Inches(0.95), size=26)
-    _line(slide, Inches(0.5), Inches(1.7), W - Inches(1.0))
-
-    # Scope / Deliverables headings
-    tb_sh = slide.shapes.add_textbox(Inches(0.5), Inches(1.78), Inches(5.8), Inches(0.3))
-    r_sh = tb_sh.text_frame.paragraphs[0].add_run()
-    r_sh.text = 'Scope'
-    r_sh.font.name = F_HEAD
-    r_sh.font.size = Pt(13)
-    r_sh.font.bold = True
-    r_sh.font.color.rgb = accent
-
-    tb_dh = slide.shapes.add_textbox(Inches(6.65), Inches(1.78), Inches(6.0), Inches(0.3))
-    r_dh = tb_dh.text_frame.paragraphs[0].add_run()
-    r_dh.text = 'Deliverables'
-    r_dh.font.name = F_HEAD
-    r_dh.font.size = Pt(13)
-    r_dh.font.bold = True
-    r_dh.font.color.rgb = accent
-
-    # Vertical rule
-    _rect(slide, Inches(6.5), Inches(1.78), Inches(0.01), Inches(4.6), RULE)
-
-    # Scope prose (left)
-    prose = _get_prose(body_text, 4)
-    if prose:
-        _body_text(slide, [('prose', prose)], Inches(0.5), Inches(2.15), Inches(5.8), Inches(4.2), size=12)
-
-    # Deliverables bullets (right)
-    bullets = _get_bullets(body_text, 8)
+    _bg(slide, WHITE); _logo(slide); _label(slide, 'Your brief', accent)
+    _rule(slide, Inches(0.5), Inches(0.92), W-Inches(1.0))
+    _heading(slide, 'Our understanding', y=Inches(0.96), size=26)
+    _rule(slide, Inches(0.5), Inches(1.68), W-Inches(1.0))
+    prose = [(t,c) for t,c in _parse(body) if t=='prose' and not _is_heading_line(c)]
+    bullets = [(t,c) for t,c in _parse(body) if t=='bullet']
     if bullets:
-        _body_text(slide, [('bullet', b) for b in bullets],
-                   Inches(6.65), Inches(2.15), Inches(6.0), Inches(4.2), size=11.5)
+        _textbox(slide, prose, Inches(0.5), Inches(1.76), Inches(5.9), Inches(5.3), size=12.5)
+        _box(slide, Inches(6.55), Inches(1.76), Inches(0.01), Inches(5.0), RULE)
+        _textbox(slide, bullets, Inches(6.7), Inches(1.76), Inches(6.0), Inches(5.3), size=11.5)
+    else:
+        _textbox(slide, prose, Inches(0.5), Inches(1.76), W-Inches(1.0), Inches(5.3), size=12.5)
+    _footer(slide)
 
-    # Fee bottom right
-    _line(slide, Inches(6.65), H - Inches(0.85), Inches(6.0), RULE)
-    tb_fee = slide.shapes.add_textbox(Inches(6.65), H - Inches(0.82), Inches(6.0), Inches(0.35))
-    tf_fee = tb_fee.text_frame
-    p_tot = tf_fee.paragraphs[0]
-    r_tot = p_tot.add_run()
-    r_tot.text = 'Total'
-    r_tot.font.name = F_BODY
-    r_tot.font.size = Pt(8)
-    r_tot.font.color.rgb = GREY
 
-    p_fee = tf_fee.add_paragraph()
-    r_fee = p_fee.add_run()
-    r_fee.text = '[FEE: TBC — rate card required]'
-    r_fee.font.name = F_HEAD
-    r_fee.font.size = Pt(16)
-    r_fee.font.bold = True
-    r_fee.font.color.rgb = BLACK
+def slide_process_summary(prs, stages, accent):
+    """
+    Overview slide showing all stages as numbered columns.
+    stages: list of {'number', 'title', 'subtitle', 'riba', 'duration'}
+    """
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _bg(slide, WHITE); _logo(slide); _label(slide, 'Our methodology', accent)
+    _rule(slide, Inches(0.5), Inches(0.92), W-Inches(1.0))
+    _heading(slide, 'Our approach', y=Inches(0.96), size=26)
+
+    # One-line intro
+    tb_i = slide.shapes.add_textbox(Inches(0.5), Inches(1.68), W-Inches(1.0), Inches(0.38))
+    r_i = tb_i.text_frame.paragraphs[0].add_run()
+    r_i.text = 'Our process is structured across ' + str(len(stages)) + ' stages, each with clear deliverables and agreed review points.'
+    r_i.font.name = F_BODY; r_i.font.size = Pt(12); r_i.font.color.rgb = MID
+
+    # Dark RIBA bar
+    _box(slide, Inches(0.5), Inches(2.12), W-Inches(1.0), Inches(0.32), BLACK)
+    tb_bar = slide.shapes.add_textbox(Inches(0.6), Inches(2.12), Inches(6), Inches(0.32))
+    r_bar = tb_bar.text_frame.paragraphs[0].add_run()
+    stage_labels = list(dict.fromkeys(s.get('stage_label','') for s in stages if s.get('stage_label')))
+    r_bar.text = '  |  '.join(stage_labels) if stage_labels else 'OUR PROCESS'
+    r_bar.font.name = F_BODY; r_bar.font.size = Pt(9.5)
+    r_bar.font.bold = True; r_bar.font.color.rgb = WHITE
+
+    n = len(stages)
+    col_w = (W - Inches(1.0)) / n
+    top_y = Inches(2.55)
+
+    for i, stage in enumerate(stages):
+        x = Inches(0.5) + i * col_w
+        # Large number
+        tb_n = slide.shapes.add_textbox(x, top_y, Inches(0.65), Inches(0.8))
+        r_n = tb_n.text_frame.paragraphs[0].add_run()
+        r_n.text = str(stage.get('number', i+1))
+        r_n.font.name = F_HEAD; r_n.font.size = Pt(40)
+        r_n.font.bold = True; r_n.font.color.rgb = BLACK
+
+        # Title
+        tb_t = slide.shapes.add_textbox(x + Inches(0.65), top_y + Inches(0.1),
+                                         col_w - Inches(0.75), Inches(0.65))
+        tf_t = tb_t.text_frame; tf_t.word_wrap = True
+        r_t = tf_t.paragraphs[0].add_run()
+        r_t.text = stage.get('title','')
+        r_t.font.name = F_HEAD; r_t.font.size = Pt(12)
+        r_t.font.bold = True; r_t.font.color.rgb = BLACK
+
+        # Subtitle / duration
+        if stage.get('subtitle') or stage.get('duration'):
+            tb_s = slide.shapes.add_textbox(x, top_y + Inches(0.82), col_w - Inches(0.1), Inches(0.28))
+            r_s = tb_s.text_frame.paragraphs[0].add_run()
+            r_s.text = stage.get('subtitle','') + (f"  |  {stage['duration']}" if stage.get('duration') else '')
+            r_s.font.name = F_BODY; r_s.font.size = Pt(9.5)
+            r_s.font.italic = True; r_s.font.color.rgb = GREY
+
+        # Accent rule under number
+        _box(slide, x, top_y + Inches(1.15), col_w - Inches(0.15), Inches(0.025), accent)
+
+        # Key deliverables
+        delivs = stage.get('deliverables', [])
+        if delivs:
+            _textbox(slide, [('bullet', d) for d in delivs[:5]],
+                     x, top_y + Inches(1.22), col_w - Inches(0.15), Inches(3.8), size=10)
+
+        # Column divider
+        if i < n-1:
+            _box(slide, x + col_w - Inches(0.06), top_y, Inches(0.01), Inches(4.5), RULE)
+
+    _footer(slide)
+
+
+def slide_stage_detail(prs, section_label, stage_title, body, accent):
+    """
+    Detailed stage slide: Objective | Process | Deliverables | Meetings
+    Four columns matching real 20.20 format.
+    """
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _bg(slide, WHITE); _logo(slide); _label(slide, section_label, accent)
+    _rule(slide, Inches(0.5), Inches(0.92), W-Inches(1.0))
+    _heading(slide, stage_title, y=Inches(0.96), size=24)
+
+    # Intro line
+    intro = _prose(body, 2)
+    if intro:
+        tb_i = slide.shapes.add_textbox(Inches(0.5), Inches(1.68), W-Inches(1.0), Inches(0.42))
+        tf_i = tb_i.text_frame; tf_i.word_wrap = True
+        r_i = tf_i.paragraphs[0].add_run()
+        r_i.text = intro
+        r_i.font.name = F_BODY; r_i.font.size = Pt(12); r_i.font.color.rgb = MID
+
+    _rule(slide, Inches(0.5), Inches(2.16), W-Inches(1.0))
+
+    # Extract structured sections
+    obj_txt  = _section_of(body, 'Objective')  or _prose(body, 2)
+    proc_txt = _section_of(body, 'Process')
+    delv_txt = _section_of(body, 'Deliverables') or body
+    meet_txt = _section_of(body, 'Meetings') or _section_of(body, 'Presentations')
+
+    # Fall back: if no structured sections, split bullets across columns
+    all_bullets = _bullets(body, 16)
+    if not proc_txt and not meet_txt:
+        third = max(1, len(all_bullets) // 3)
+        obj_bullets  = [obj_txt] if obj_txt and obj_txt != _prose(body,2) else all_bullets[:third]
+        proc_bullets = all_bullets[third:third*2]
+        delv_bullets = all_bullets[third*2:]
+        meet_bullets = []
+    else:
+        obj_bullets  = [obj_txt] if obj_txt else []
+        proc_bullets = _bullets(proc_txt, 8) if proc_txt else []
+        delv_bullets = _bullets(delv_txt, 8) if delv_txt else all_bullets
+        meet_bullets = _bullets(meet_txt, 4) if meet_txt else []
+
+    col_start = Inches(2.24)
+    col_h     = H - col_start - Inches(0.35)
+    col_w     = (W - Inches(1.0)) / 4
+    cols = [
+        ('Objective',    [(t if t!='prose' else 'prose', c) for t,c in
+                          [('prose',b) if isinstance(b,str) else b for b in obj_bullets]]),
+        ('Process',      [('bullet',b) for b in proc_bullets]),
+        ('Deliverables', [('bullet',b) for b in delv_bullets]),
+        ('Meetings &\nPresentations', [('bullet',b) for b in meet_bullets] or
+                          [('prose','[CONFIRM WITH CLIENT: meeting and presentation schedule]')]),
+    ]
+
+    for i, (col_label, items) in enumerate(cols):
+        x = Inches(0.5) + i * col_w
+        # Column heading
+        tb_h = slide.shapes.add_textbox(x, col_start - Inches(0.06), col_w - Inches(0.1), Inches(0.3))
+        r_h = tb_h.text_frame.paragraphs[0].add_run()
+        r_h.text = col_label; r_h.font.name = F_HEAD; r_h.font.size = Pt(11)
+        r_h.font.bold = True; r_h.font.color.rgb = accent
+        # Divider
+        if i < 3:
+            _box(slide, x + col_w - Inches(0.06), col_start, Inches(0.01), col_h, RULE)
+        _textbox(slide, items, x, col_start + Inches(0.28), col_w - Inches(0.1), col_h - Inches(0.28), size=10.5)
 
     _footer(slide)
 
 
 def slide_fees(prs, stages_data, accent):
-    """Fees and timings slide matching real 20.20 format."""
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _bg(slide, WHITE)
-    _logo(slide)
-    _section_label(slide, 'Our methodology', accent)
-    _line(slide, Inches(0.5), Inches(0.9), W - Inches(1.0))
-    _heading(slide, 'Summary fees and timings', y=Inches(0.95), size=24)
-    _line(slide, Inches(0.5), Inches(1.68), W - Inches(1.0))
+    _bg(slide, WHITE); _logo(slide); _label(slide, 'Our methodology', accent)
+    _rule(slide, Inches(0.5), Inches(0.92), W-Inches(1.0))
+    _heading(slide, 'Summary fees and timings', y=Inches(0.96), size=24)
+    _rule(slide, Inches(0.5), Inches(1.68), W-Inches(1.0))
 
     # Column headers
-    col_heads = ['', 'Fees', 'Timings', 'Invoicing schedule']
-    col_x = [Inches(0.5), Inches(4.8), Inches(6.2), Inches(7.5)]
-    for i, (h_txt, hx) in enumerate(zip(col_heads, col_x)):
-        if not h_txt: continue
-        tb = slide.shapes.add_textbox(hx, Inches(1.75), Inches(1.8), Inches(0.25))
+    for txt, x in [('Fees',Inches(4.8)),('Timings',Inches(6.2)),('Invoicing schedule',Inches(7.5))]:
+        tb = slide.shapes.add_textbox(x, Inches(1.76), Inches(3), Inches(0.25))
         r = tb.text_frame.paragraphs[0].add_run()
-        r.text = h_txt
-        r.font.name = F_BODY
-        r.font.size = Pt(9)
-        r.font.color.rgb = GREY
+        r.text = txt; r.font.name = F_BODY; r.font.size = Pt(9); r.font.color.rgb = GREY
 
-    row_h = Inches(0.9)
-    row_y_start = Inches(2.05)
+    row_h = Inches(0.88)
+    y0 = Inches(2.06)
 
-    stages = stages_data[:4]
-    for i, stage in enumerate(stages):
-        y = row_y_start + i * row_h
-        bg_col = LGREY if i % 2 == 0 else WHITE
-        _rect(slide, Inches(0.5), y, W - Inches(1.0), row_h - Inches(0.04), bg_col)
-
-        # Stage number
-        tb_n = slide.shapes.add_textbox(Inches(0.5), y + Inches(0.1), Inches(0.45), Inches(0.7))
+    for i, stage in enumerate(stages_data[:4]):
+        y = y0 + i * row_h
+        _box(slide, Inches(0.5), y, W-Inches(1.0), row_h-Inches(0.04), LGREY if i%2==0 else WHITE)
+        # Number
+        tb_n = slide.shapes.add_textbox(Inches(0.55), y+Inches(0.1), Inches(0.5), Inches(0.68))
         r_n = tb_n.text_frame.paragraphs[0].add_run()
-        r_n.text = str(i + 1)
-        r_n.font.name = F_HEAD
-        r_n.font.size = Pt(28)
-        r_n.font.bold = True
-        r_n.font.color.rgb = BLACK
-
-        # Stage title
-        tb_t = slide.shapes.add_textbox(Inches(1.0), y + Inches(0.1), Inches(3.6), Inches(0.65))
-        tf_t = tb_t.text_frame
-        tf_t.word_wrap = True
-        p_t = tf_t.paragraphs[0]
-        r_t = p_t.add_run()
-        r_t.text = stage.get('title', '').upper()
-        r_t.font.name = F_BODY
-        r_t.font.size = Pt(10)
-        r_t.font.bold = True
-        r_t.font.color.rgb = BLACK
+        r_n.text = str(i+1); r_n.font.name = F_HEAD; r_n.font.size = Pt(28)
+        r_n.font.bold = True; r_n.font.color.rgb = BLACK
+        # Stage name
+        tb_t = slide.shapes.add_textbox(Inches(1.1), y+Inches(0.1), Inches(3.55), Inches(0.68))
+        tf_t = tb_t.text_frame; tf_t.word_wrap = True
+        r_t = tf_t.paragraphs[0].add_run(); r_t.text = stage.get('title','').upper()
+        r_t.font.name = F_BODY; r_t.font.size = Pt(10); r_t.font.bold = True; r_t.font.color.rgb = BLACK
         if stage.get('sub'):
-            p_s = tf_t.add_paragraph()
-            r_s = p_s.add_run()
-            r_s.text = stage['sub']
-            r_s.font.name = F_BODY
-            r_s.font.size = Pt(9)
-            r_s.font.color.rgb = MID
-
+            r_s = tf_t.add_paragraph().add_run(); r_s.text = stage['sub']
+            r_s.font.name = F_BODY; r_s.font.size = Pt(9); r_s.font.color.rgb = MID
         # Fee
-        tb_f = slide.shapes.add_textbox(Inches(4.7), y + Inches(0.2), Inches(1.4), Inches(0.45))
+        tb_f = slide.shapes.add_textbox(Inches(4.7), y+Inches(0.2), Inches(1.4), Inches(0.45))
         r_f = tb_f.text_frame.paragraphs[0].add_run()
-        r_f.text = stage.get('fee', '[FEE: TBC]')
-        r_f.font.name = F_HEAD
-        r_f.font.size = Pt(11)
-        r_f.font.bold = True
-        r_f.font.color.rgb = BLACK
-
+        r_f.text = stage.get('fee','[FEE: TBC]'); r_f.font.name = F_HEAD
+        r_f.font.size = Pt(11); r_f.font.bold = True; r_f.font.color.rgb = BLACK
         # Timing
-        tb_ti = slide.shapes.add_textbox(Inches(6.1), y + Inches(0.2), Inches(1.2), Inches(0.45))
+        tb_ti = slide.shapes.add_textbox(Inches(6.1), y+Inches(0.2), Inches(1.2), Inches(0.45))
         r_ti = tb_ti.text_frame.paragraphs[0].add_run()
-        r_ti.text = stage.get('timing', '')
-        r_ti.font.name = F_BODY
-        r_ti.font.size = Pt(10)
-        r_ti.font.color.rgb = MID
-
+        r_ti.text = stage.get('timing',''); r_ti.font.name = F_BODY
+        r_ti.font.size = Pt(10); r_ti.font.color.rgb = MID
         # Invoicing
-        tb_inv = slide.shapes.add_textbox(Inches(7.4), y + Inches(0.1), Inches(5.0), Inches(0.65))
-        tf_inv = tb_inv.text_frame
-        tf_inv.word_wrap = True
-        r_inv = tf_inv.paragraphs[0].add_run()
-        r_inv.text = stage.get('invoicing', '50% at start, 50% at completion')
-        r_inv.font.name = F_BODY
-        r_inv.font.size = Pt(9.5)
-        r_inv.font.color.rgb = MID
+        tb_iv = slide.shapes.add_textbox(Inches(7.4), y+Inches(0.1), Inches(5.3), Inches(0.68))
+        tb_iv.text_frame.word_wrap = True
+        r_iv = tb_iv.text_frame.paragraphs[0].add_run()
+        r_iv.text = stage.get('invoicing','50% at start, 50% at completion')
+        r_iv.font.name = F_BODY; r_iv.font.size = Pt(9.5); r_iv.font.color.rgb = MID
 
-    # Total row
-    total_y = row_y_start + len(stages) * row_h + Inches(0.1)
-    _line(slide, Inches(0.5), total_y, W - Inches(1.0), BLACK)
-    tb_tot = slide.shapes.add_textbox(Inches(1.0), total_y + Inches(0.08), Inches(3.5), Inches(0.5))
-    tf_tot = tb_tot.text_frame
-    p_tot = tf_tot.paragraphs[0]
-    r_tot = p_tot.add_run()
-    r_tot.text = 'TOTAL 20.20 FEES'
-    r_tot.font.name = F_HEAD
-    r_tot.font.size = Pt(10)
-    r_tot.font.bold = True
-    r_tot.font.color.rgb = BLACK
+    # Total
+    tot_y = y0 + len(stages_data[:4]) * row_h + Inches(0.1)
+    _rule(slide, Inches(0.5), tot_y, W-Inches(1.0), BLACK)
+    tb_tt = slide.shapes.add_textbox(Inches(1.1), tot_y+Inches(0.1), Inches(3.5), Inches(0.4))
+    r_tt = tb_tt.text_frame.paragraphs[0].add_run(); r_tt.text = 'TOTAL 20.20 FEES'
+    r_tt.font.name = F_HEAD; r_tt.font.size = Pt(10); r_tt.font.bold = True; r_tt.font.color.rgb = BLACK
+    tb_tf = slide.shapes.add_textbox(Inches(4.7), tot_y+Inches(0.1), Inches(1.4), Inches(0.35))
+    r_tf = tb_tf.text_frame.paragraphs[0].add_run(); r_tf.text = '[FEE: TBC]'
+    r_tf.font.name = F_HEAD; r_tf.font.size = Pt(11); r_tf.font.bold = True; r_tf.font.color.rgb = BLACK
 
-    tb_totf = slide.shapes.add_textbox(Inches(4.7), total_y + Inches(0.08), Inches(1.4), Inches(0.35))
-    r_totf = tb_totf.text_frame.paragraphs[0].add_run()
-    r_totf.text = '[FEE: TBC]'
-    r_totf.font.name = F_HEAD
-    r_totf.font.size = Pt(11)
-    r_totf.font.bold = True
-    r_totf.font.color.rgb = BLACK
-
-    # Small print
-    tb_sm = slide.shapes.add_textbox(Inches(0.5), H - Inches(0.5), Inches(9), Inches(0.28))
+    tb_sm = slide.shapes.add_textbox(Inches(0.5), H-Inches(0.48), Inches(9), Inches(0.26))
     r_sm = tb_sm.text_frame.paragraphs[0].add_run()
     r_sm.text = 'Fees are exclusive of VAT, 3rd party costs, general expenses and travel. Subject to contract.'
-    r_sm.font.name = F_BODY
-    r_sm.font.size = Pt(8)
-    r_sm.font.italic = True
-    r_sm.font.color.rgb = GREY
-
+    r_sm.font.name = F_BODY; r_sm.font.size = Pt(8); r_sm.font.italic = True; r_sm.font.color.rgb = GREY
     _footer(slide)
 
 
 def slide_divider(prs, word, accent):
-    """Dark section divider slide."""
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _bg(slide, DARK)
-    _logo(slide, dark=True)
-
-    tb = slide.shapes.add_textbox(Inches(0.5), H - Inches(2.2), W - Inches(1.0), Inches(1.8))
-    tf = tb.text_frame
-    p = tf.paragraphs[0]
-    run = p.add_run()
-    run.text = word
-    run.font.name = F_HEAD
-    run.font.size = Pt(72)
-    run.font.bold = True
-    run.font.color.rgb = WHITE
+    _bg(slide, DARK); _logo(slide, dark=True)
+    tb = slide.shapes.add_textbox(Inches(0.5), H-Inches(2.2), W-Inches(1.0), Inches(1.8))
+    r = tb.text_frame.paragraphs[0].add_run(); r.text = word
+    r.font.name = F_HEAD; r.font.size = Pt(72); r.font.bold = True; r.font.color.rgb = WHITE
 
 
-def slide_next_steps(prs, body_text, accent):
-    """Next steps — 4 numbered cards."""
+def slide_next_steps(prs, body, accent):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _bg(slide, WHITE)
-    _logo(slide)
-    _section_label(slide, 'Next steps', accent)
-    _line(slide, Inches(0.5), Inches(0.9), W - Inches(1.0))
-    _heading(slide, 'Next steps', y=Inches(0.95), size=26)
-    _line(slide, Inches(0.5), Inches(1.68), W - Inches(1.0))
+    _bg(slide, WHITE); _logo(slide); _label(slide, 'Next steps', accent)
+    _rule(slide, Inches(0.5), Inches(0.92), W-Inches(1.0))
+    _heading(slide, 'Next steps', y=Inches(0.96), size=26)
+    _rule(slide, Inches(0.5), Inches(1.68), W-Inches(1.0))
 
-    bullets = _get_bullets(body_text, 4)
-    default_steps = [
+    bullets = _bullets(body, 4)
+    defaults = [
         ('Review this proposal', 'Share with your team. Note any questions, changes or additions.'),
         ('Return your feedback', 'Send us your comments and we will revise and reissue.'),
-        ('Site visit and kick-off', 'If you are minded to appoint us, we propose visiting the venue together.'),
-        ('Appointment', 'We can move quickly. We are ready to mobilise from instruction.'),
+        ('Site visit and kick-off', 'If you are minded to appoint us, we propose visiting the venue.'),
+        ('Appointment', 'We can mobilise quickly from instruction.'),
     ]
-
-    card_w = Inches(2.9)
-    card_h = Inches(4.2)
-    card_y = Inches(1.85)
-    gap = Inches(0.22)
-    start_x = Inches(0.5)
-
+    cw = Inches(2.9); gap = Inches(0.22)
     for i in range(4):
-        x = start_x + i * (card_w + gap)
-        _rect(slide, x, card_y, card_w, card_h, LGREY)
-
-        # Number
-        tb_n = slide.shapes.add_textbox(x + Inches(0.18), card_y + Inches(0.15), Inches(0.6), Inches(0.55))
-        r_n = tb_n.text_frame.paragraphs[0].add_run()
-        r_n.text = f'0{i+1}'
-        r_n.font.name = F_HEAD
-        r_n.font.size = Pt(22)
-        r_n.font.bold = True
-        r_n.font.color.rgb = accent
-
-        _rect(slide, x + Inches(0.18), card_y + Inches(0.75), Inches(1.5), Inches(0.03), accent)
-
-        # Title
-        if i < len(bullets):
-            # Parse from generated content
-            title = bullets[i]
-            desc = ''
-        else:
-            title, desc = default_steps[i]
-
-        tb_t = slide.shapes.add_textbox(x + Inches(0.18), card_y + Inches(0.85), card_w - Inches(0.3), Inches(0.55))
-        tf_t = tb_t.text_frame
-        tf_t.word_wrap = True
-        r_t = tf_t.paragraphs[0].add_run()
-        r_t.text = title
-        r_t.font.name = F_HEAD
-        r_t.font.size = Pt(11)
-        r_t.font.bold = True
-        r_t.font.color.rgb = BLACK
-
+        x = Inches(0.5) + i*(cw+gap)
+        _box(slide, x, Inches(1.85), cw, Inches(4.2), LGREY)
+        tb_n = slide.shapes.add_textbox(x+Inches(0.18), Inches(2.0), Inches(0.6), Inches(0.52))
+        r_n = tb_n.text_frame.paragraphs[0].add_run(); r_n.text = f'0{i+1}'
+        r_n.font.name = F_HEAD; r_n.font.size = Pt(22); r_n.font.bold = True; r_n.font.color.rgb = accent
+        _box(slide, x+Inches(0.18), Inches(2.56), Inches(1.5), Inches(0.025), accent)
+        title = bullets[i] if i < len(bullets) else defaults[i][0]
+        desc  = '' if i < len(bullets) else defaults[i][1]
+        tb_t = slide.shapes.add_textbox(x+Inches(0.18), Inches(2.62), cw-Inches(0.3), Inches(0.55))
+        tb_t.text_frame.word_wrap = True
+        r_t = tb_t.text_frame.paragraphs[0].add_run(); r_t.text = title
+        r_t.font.name = F_HEAD; r_t.font.size = Pt(11); r_t.font.bold = True; r_t.font.color.rgb = BLACK
         if desc:
-            tb_d = slide.shapes.add_textbox(x + Inches(0.18), card_y + Inches(1.5), card_w - Inches(0.3), Inches(2.3))
-            tf_d = tb_d.text_frame
-            tf_d.word_wrap = True
-            r_d = tf_d.paragraphs[0].add_run()
-            r_d.text = desc
-            r_d.font.name = F_BODY
-            r_d.font.size = Pt(10)
-            r_d.font.color.rgb = MID
-
+            tb_d = slide.shapes.add_textbox(x+Inches(0.18), Inches(3.25), cw-Inches(0.3), Inches(2.3))
+            tb_d.text_frame.word_wrap = True
+            r_d = tb_d.text_frame.paragraphs[0].add_run(); r_d.text = desc
+            r_d.font.name = F_BODY; r_d.font.size = Pt(10); r_d.font.color.rgb = MID
     _footer(slide)
 
 
-# ── MAIN BUILD FUNCTION ───────────────────────────────────────────────────────
+# ── MAIN ──────────────────────────────────────────────────────────────────────
 
 def find_section(sections, *keys):
     for key in keys:
         kl = key.lower()
         for sec in sections:
-            h = sec.get('heading', '').lower()
+            h = sec.get('heading','').lower()
             if kl in h or h in kl:
-                return _clean(sec.get('body', ''))
+                return _clean(sec.get('body',''))
     return ''
 
-def build_pptx_clean(sections, meta, output_path):
-    """Build a complete branded proposal PPTX using python-pptx."""
-    from pptx import Presentation
-    from pptx.util import Inches, Pt, Emu
+# Stage definitions by brief type
+# RIBA-based proposals (newbuild, refurb, multi-stage)
+STAGES_RIBA = [
+    {'number':1,'title':'Strategic framework','subtitle':'Understand and define',
+     'stage_label':'RIBA Stage 2','duration':'1 week',
+     'deliverables':['Design principles per tier','Experience propositions','Naming and narratives','Design direction mood boards','Strategic report']},
+    {'number':2,'title':'Concept design','subtitle':'Overarching look and feel',
+     'stage_label':'RIBA Stage 2','duration':'2 weeks',
+     'deliverables':['GA plans and zoning','Materials and mood boards','Brand identities','CGI visuals (min 2 per space)','Concept report']},
+    {'number':3,'title':'Design development','subtitle':'Refine and finalise',
+     'stage_label':'RIBA Stage 2','duration':'2 weeks',
+     'deliverables':['Finalised GA plan and RCP','Sample boards','Furniture selection','Concept freeze','Design specification']},
+    {'number':4,'title':'Design intent and artwork','subtitle':'Technical production',
+     'stage_label':'RIBA Stage 3','duration':'4 weeks',
+     'deliverables':['Full drawing pack','Elevations and sections','FFE schedules','Graphic artwork files','Specification document']},
+    {'number':5,'title':'Coordination','subtitle':'On-site guardianship',
+     'stage_label':'RIBA Stages 4-5','duration':'Programme dependent',
+     'deliverables':['Contractor drawing review','Sample approvals','Site meetings','Value engineering support']},
+    {'number':6,'title':'Handover','subtitle':'Completion and sign-off',
+     'stage_label':'RIBA Stage 6','duration':'1 week',
+     'deliverables':['Site inspection','Snagging report','Practical completion sign-off']},
+]
 
-    client  = meta.get('client', '')
-    venue   = meta.get('venue', 'Project')
-    contact = meta.get('contact', '')
-    role    = meta.get('role', '')
-    date_s  = meta.get('date', '')
+# Phase-based proposals (arena, single space, sponsor, brand)
+STAGES_PHASE = [
+    {'number':1,'title':'Discovery and strategy','subtitle':'Understand and define',
+     'stage_label':'Phase 1','duration':'1 week',
+     'deliverables':['Project brief audit','Experience proposition','Design principles','Naming and narrative direction','Strategy document']},
+    {'number':2,'title':'Concept design','subtitle':'Creative direction and look and feel',
+     'stage_label':'Phase 2','duration':'2 weeks',
+     'deliverables':['Space planning and layout','Materials and mood boards','Brand identity direction','CGI visuals','Concept report']},
+    {'number':3,'title':'Design development','subtitle':'Refine, specify and freeze',
+     'stage_label':'Phase 3','duration':'2 weeks',
+     'deliverables':['Finalised design drawings','Sample boards','Furniture selection','Graphic artwork','Concept freeze document']},
+    {'number':4,'title':'Production and delivery','subtitle':'Artwork and handover',
+     'stage_label':'Phase 4','duration':'4 weeks',
+     'deliverables':['Print-ready artwork files','Installation drawings','Supplier packs','Quality sign-off checklist']},
+]
+
+def get_stage_defs(brief_type, riba_stages):
+    """Return appropriate stage definitions based on brief type."""
+    bt = (brief_type or '').lower()
+    riba = (riba_stages or '').upper()
+    # Use phase-based for non-RIBA brief types
+    if any(x in bt for x in ('arena','single','sponsor','brand','one space','lounge','suite')):
+        return STAGES_PHASE, False
+    # Use RIBA if explicitly mentioned
+    if 'riba' in riba or any(x in bt for x in ('newbuild','refurb','multi','full')):
+        return STAGES_RIBA, True
+    # Default: RIBA for anything with multiple stages, phase for single
+    return STAGES_RIBA, True
+
+def build_pptx_clean(sections, meta, output_path):
+    client  = meta.get('client','')
+    venue   = meta.get('venue','Project')
+    contact = meta.get('contact','')
+    role    = meta.get('role','')
+    date_s  = meta.get('date','')
+    riba    = meta.get('riba_stages','')
     accent  = _accent(client)
 
-    # Start from a blank presentation — no template XML to fight with
     prs = Presentation()
     prs.slide_width  = W
     prs.slide_height = H
 
-    # ── Slide 1: Cover ────────────────────────────────────────────────────────
+    # Work out which stages to include from brief type and riba_stages
+    brief_type = meta.get('brief_type','')
+    stage_defs, is_riba = get_stage_defs(brief_type, riba)
+
+    stage_nums = []
+    if riba:
+        nums = re.findall(r'\d+', riba)
+        if nums:
+            lo, hi = int(nums[0]), int(nums[-1])
+            stage_nums = list(range(lo, hi+1))
+    if not stage_nums:
+        stage_nums = [1,2,3,4]
+
+    active_stages = [s for s in stage_defs if s['number'] in stage_nums]
+    if not active_stages:
+        active_stages = stage_defs[:4]
+
+    # 1. Cover
     slide_cover(prs, venue, client, contact, role, date_s, accent)
 
-    # ── Slide 2: Hello / cover letter ────────────────────────────────────────
-    cover_txt = find_section(sections, 'cover letter', 'cover', 'hello')
+    # 2. Hello
+    cover_txt = find_section(sections,'cover letter','cover','hello')
     slide_hello(prs, cover_txt, accent)
 
-    # ── Slide 3: Your brief ───────────────────────────────────────────────────
-    brief_txt = find_section(sections, 'your brief', 'brief reflection', 'understanding')
+    # 3. Brief
+    brief_txt = find_section(sections,'your brief','brief reflection','understanding')
     slide_brief(prs, brief_txt, accent)
 
-    # ── Slide 4: Our methodology divider ─────────────────────────────────────
+    # 4. Methodology divider
     slide_divider(prs, 'Our methodology', accent)
 
-    # ── Slides 5-8: Stages ───────────────────────────────────────────────────
-    stage_map = [
-        ('stage 1', 'strategic framework', 'Stage 1 — Strategic framework'),
-        ('stage 2', 'concept design',      'Stage 2 — Concept design'),
-        ('stage 3', 'design development',  'Stage 3 — Design development'),
-        ('stages 4', 'design intent',       'Stages 4, 5 and 6'),
-    ]
-    for key1, key2, label in stage_map:
-        txt = find_section(sections, key1, key2)
-        slide_stage(prs, 'Our methodology', label, txt, accent)
+    # 5. Process summary
+    slide_process_summary(prs, active_stages, accent)
 
-    # ── Slide 9: Fees ─────────────────────────────────────────────────────────
+    # 6-N. Stage detail slides
+    stage_section_map = [
+        (1, 'stage 1','strategic framework','Stage 1 — Strategic framework'),
+        (2, 'stage 2','concept design',     'Stage 2 — Concept design'),
+        (3, 'stage 3','design development', 'Stage 3 — Design development'),
+        (4, 'stages 4','design intent',      'Stages 4, 5 and 6'),
+    ]
+    for num, k1, k2, label in stage_section_map:
+        if num in stage_nums or (num==4 and any(n>=4 for n in stage_nums)):
+            txt = find_section(sections, k1, k2)
+            slide_stage_detail(prs, 'Our methodology', label, txt, accent)
+
+    # Fees
     fees_stages = [
-        {'title': 'Strategic framework', 'sub': 'Workshop, site visit and proposition',
-         'fee': '[FEE: TBC]', 'timing': '1 week', 'invoicing': '100% at start of stage'},
-        {'title': 'Concept design',      'sub': 'Layouts, materials, CGI visuals',
-         'fee': '[FEE: TBC]', 'timing': '2 weeks', 'invoicing': '50% at start, 50% at completion'},
-        {'title': 'Design development',  'sub': 'Sample boards and concept freeze',
-         'fee': '[FEE: TBC]', 'timing': '2 weeks', 'invoicing': '50% at start, 50% at completion'},
-        {'title': 'Design intent and artwork', 'sub': 'Drawing pack and graphic artwork',
-         'fee': '[FEE: TBC]', 'timing': '4 weeks', 'invoicing': '50% at start, 50% at completion'},
+        {'title':'Strategic framework','sub':'Workshop, site visit and proposition',
+         'fee':'[FEE: TBC]','timing':'1 week','invoicing':'100% at start of stage'},
+        {'title':'Concept design','sub':'Layouts, materials, CGI visuals',
+         'fee':'[FEE: TBC]','timing':'2 weeks','invoicing':'50% at start, 50% at completion'},
+        {'title':'Design development','sub':'Sample boards and concept freeze',
+         'fee':'[FEE: TBC]','timing':'2 weeks','invoicing':'50% at start, 50% at completion'},
+        {'title':'Design intent and artwork','sub':'Drawing pack and graphic artwork',
+         'fee':'[FEE: TBC]','timing':'4 weeks','invoicing':'50% at start, 50% at completion'},
     ]
     slide_fees(prs, fees_stages, accent)
 
-    # ── Slide 10: Next steps ──────────────────────────────────────────────────
-    next_txt = find_section(sections, 'next steps', 'programme', 'fees')
+    # Next steps
+    next_txt = find_section(sections,'next steps')
     slide_next_steps(prs, next_txt, accent)
 
     prs.save(output_path)

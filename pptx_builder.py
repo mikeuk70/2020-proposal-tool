@@ -234,13 +234,89 @@ def slide_cover(prs, venue, client, contact, role, date_s, accent):
 
 
 def slide_hello(prs, body, accent):
+    """
+    Cover letter slide — "Hello." headline, letter body, personal sign-off.
+    Matches real 20.20 format: left-justified, personal, concise.
+    """
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _bg(slide, WHITE); _logo(slide); _label(slide, 'Introduction', accent)
-    _rule(slide, Inches(0.5), Inches(0.92), W-Inches(1.0))
-    _heading(slide, 'Hello', y=Inches(0.96), size=28)
-    _rule(slide, Inches(0.5), Inches(1.68), W-Inches(1.0))
-    paras = [(t,c) for t,c in _parse(body) if not (t=='prose' and len(c)<25 and '.' not in c)]
-    _textbox(slide, paras, Inches(0.5), Inches(1.76), W-Inches(1.0), Inches(5.2), size=12.5)
+    _bg(slide, WHITE); _logo(slide)
+
+    # Project label top left (from brief metadata — added by caller)
+    _label(slide, 'Introduction', accent)
+    _rule(slide, Inches(0.5), Inches(0.88), W - Inches(1.0))
+
+    # "Hello." headline — bold, left, with full stop
+    tb_h = slide.shapes.add_textbox(Inches(0.5), Inches(0.94), Inches(5), Inches(0.62))
+    p_hh = tb_h.text_frame.paragraphs[0]
+    p_hh.alignment = PP_ALIGN.LEFT
+    r_h = p_hh.add_run()
+    r_h.text = 'Hello.'
+    r_h.font.name = F_HEAD; r_h.font.size = Pt(30)
+    r_h.font.bold = True; r_h.font.color.rgb = BLACK
+
+    # Parse body — separate Dear/greeting, paragraphs, and sign-off
+    clean_body = _clean(body)
+    lines = [l.strip() for l in clean_body.splitlines() if l.strip()]
+
+    # Find "Dear X" line
+    greeting = ''
+    sign_off_lines = []
+    body_lines = []
+    in_signoff = False
+
+    for line in lines:
+        if line.lower().startswith('dear '):
+            greeting = line
+        elif line.lower().startswith('kind regards') or line.lower().startswith('the 20.20'):
+            in_signoff = True
+            sign_off_lines.append(line)
+        elif in_signoff:
+            sign_off_lines.append(line)
+        elif not greeting or body_lines or len(line) > 20:
+            body_lines.append(line)
+
+    # If no explicit sign-off found, add one
+    if not sign_off_lines:
+        sign_off_lines = ['Kind regards,', 'The 20.20 team']
+
+    # Letter body — left third to two-thirds width (matching SAFC/CPFC style)
+    letter_w = Inches(8.5)
+    letter_x = Inches(0.5)
+    y_start = Inches(1.65)
+
+    # Greeting (Dear X,)
+    if greeting:
+        tb_g = slide.shapes.add_textbox(letter_x, y_start, letter_w, Inches(0.35))
+        tf_g = tb_g.text_frame
+        p_g = tf_g.paragraphs[0]
+        p_g.alignment = PP_ALIGN.LEFT
+        r_g = p_g.add_run()
+        r_g.text = greeting
+        r_g.font.name = F_BODY; r_g.font.size = Pt(12.5); r_g.font.color.rgb = MID
+        y_start += Inches(0.48)
+
+    # Body paragraphs
+    paras_data = []
+    for line in body_lines:
+        if len(line) > 15:
+            paras_data.append(('prose', line))
+
+    if paras_data:
+        _textbox(slide, paras_data, letter_x, y_start, letter_w,
+                 H - y_start - Inches(1.2), size=12.5)
+
+    # Sign-off block — bottom of letter
+    sign_y = H - Inches(1.1)
+    tb_s = slide.shapes.add_textbox(letter_x, sign_y, letter_w, Inches(0.8))
+    tf_s = tb_s.text_frame
+    first = True
+    for sl in sign_off_lines:
+        p = tf_s.paragraphs[0] if first else tf_s.add_paragraph()
+        first = False
+        r = p.add_run(); r.text = sl
+        r.font.name = F_BODY; r.font.size = Pt(12)
+        r.font.color.rgb = MID
+
     _footer(slide)
 
 

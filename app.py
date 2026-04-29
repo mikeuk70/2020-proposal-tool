@@ -635,7 +635,30 @@ Important:
 
 SECTIONS = [
     ('cover',   'Cover letter',
-     'Write the cover letter. Address {contact} by first name. Client is {client}. Personal, direct, 3-4 short paragraphs. Reference what we know about their project and ambitions. This is the ONLY section where the client name appears.\n\n{ctx}'),
+     '''Write the cover letter for this 20.20 proposal. This appears as the "Hello" slide — a personal letter from the 20.20 team to the client contact.
+
+Format:
+- Start with "Dear [first name of contact],"
+- 3-4 short paragraphs of no more than 4 sentences each
+- Sign off: "Kind regards,\nThe 20.20 team"
+
+Paragraph 1: A personal, confident opening. Reference something specific about the project or the club that shows we have done our homework. Make it feel like it comes from someone who genuinely knows this world.
+
+Paragraph 2: What this proposal contains — the stages covered, what we are committing to deliver, and what we need from the client to make it work.
+
+Paragraph 3: A short statement of why 20.20 is the right partner. Reference the hospitality pyramid approach, narrative-led design, commercial rigour. Not boastful — just direct and confident.
+
+Paragraph 4 (optional): A forward-looking line about next steps or what excites us about the project.
+
+Rules:
+- Address the contact by first name in the opening line only
+- The client organisation name may appear naturally once or twice — this is the only section where it does
+- No em dashes
+- No AI phrases (leveraging, seamless, holistic, transformative)
+- Short sentences. Active voice.
+- Warm but professional — not corporate, not salesy
+
+{ctx}'''),
     ('brief',   'Your brief',
      'Write "Your brief" — our understanding of the project. Show commercial and strategic awareness. 2-3 paragraphs then 4-6 bullet points covering key project facts and drivers. Use "the club" or "the venue". No client name.\n\n{ctx}'),
     ('stage1',  'Stage 1 — Strategic framework',

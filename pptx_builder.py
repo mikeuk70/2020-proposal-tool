@@ -50,10 +50,15 @@ def _accent(name):
 
 def _clean(t):
     if not t: return ''
-    t = re.sub(r'\*\*([^*]+)\*\*',r'\1',t)
-    t = re.sub(r'\*([^*]+)\*',r'\1',t)
-    t = re.sub(r'^#{1,3}\s*','',t,flags=re.MULTILINE)
-    t = re.sub(r'\n{3,}','\n\n',t)
+    # Strip markdown bold/italic
+    t = re.sub(r'\*\*([^*]+)\*\*', r'\1', t)
+    t = re.sub(r'\*([^*]+)\*', r'\1', t)
+    # Strip markdown headers
+    t = re.sub(r'^#{1,3}\s*', '', t, flags=re.MULTILINE)
+    # Strip any remaining asterisks used as bold markers
+    t = re.sub(r'\*\*|__', '', t)
+    # Normalise excessive newlines
+    t = re.sub(r'\n{3,}', '\n\n', t)
     return t.strip()
 
 def _is_heading_line(s):
@@ -479,13 +484,20 @@ def slide_stage_detail(prs, section_label, stage_title, body, accent):
     col_start = Inches(2.24)
     col_h     = H - col_start - Inches(0.35)
     col_w     = (W - Inches(1.0)) / 4
+    # Default meetings cadence if not specified in content
+    default_meetings = [
+        'Kick-off meeting and site visit at start of stage',
+        'Mid-stage review — design team and client',
+        'End-of-stage presentation and sign-off',
+        'All documents issued via PDF; meetings in person or on Teams',
+    ]
     cols = [
         ('Objective',    [(t if t!='prose' else 'prose', c) for t,c in
                           [('prose',b) if isinstance(b,str) else b for b in obj_bullets]]),
         ('Process',      [('bullet',b) for b in proc_bullets]),
         ('Deliverables', [('bullet',b) for b in delv_bullets]),
-        ('Meetings &\nPresentations', [('bullet',b) for b in meet_bullets] or
-                          [('prose','[CONFIRM WITH CLIENT: meeting and presentation schedule]')]),
+        ('Meetings &\nPresentations', [('bullet',b) for b in meet_bullets] if meet_bullets
+                          else [('bullet',b) for b in default_meetings]),
     ]
 
     for i, (col_label, items) in enumerate(cols):
@@ -728,28 +740,45 @@ def build_pptx_clean(sections, meta, output_path):
     # 5. Process summary
     slide_process_summary(prs, active_stages, accent)
 
-    # 6-N. Stage detail slides — labels adapt to brief type (RIBA stages vs phases)
+    # 6-N. Stage detail slides — labels adapt to brief type and actual RIBA stage numbers
+    continuation = meta.get('continuation','no').lower() == 'yes'
+    prior_done = meta.get('prior_stages_completed','')
+
     if is_riba:
-        stage_section_map = [
-            (1, 'stage 1','strategic framework', 'Stage 1 — Strategic framework'),
-            (2, 'stage 2','concept design',      'Stage 2 — Concept design'),
-            (3, 'stage 3','design development',  'Stage 3 — Design development'),
-            (4, 'stages 4','design intent',
-             'Stages 4, 5 and 6' if all(n in stage_nums for n in [4,5,6]) else
-             'Stage 4 — Design intent and artwork'),
-        ]
+        # Build stage labels from actual stage_nums — respect continuation
+        # e.g. if stage_nums = [3,4,5,6], label as Stage 3, Stage 4, etc.
+        RIBA_LABELS = {
+            1: ('stage 1','strategic framework', 'Stage 1 — Strategic framework'),
+            2: ('stage 2','concept design',      'Stage 2 — Concept design'),
+            3: ('stage 3','design development',  'Stage 3 — Design development'),
+            4: ('stages 4','design intent',      'Stage 4 — Design intent and artwork'),
+            5: ('stage 5','coordination',        'Stage 5 — Coordination and liaison'),
+            6: ('stage 6','handover',            'Stage 6 — Handover'),
+        }
+        # Collapse 4+5+6 if all present
+        working_nums = list(stage_nums)
+        if 4 in working_nums and 5 in working_nums and 6 in working_nums:
+            working_nums = [n for n in working_nums if n < 4] + [4]
+            RIBA_LABELS[4] = ('stages 4','design intent', 'Stages 4, 5 and 6')
+
+        stage_section_map = []
+        for n in sorted(set(working_nums)):
+            if n in RIBA_LABELS:
+                k1, k2, label = RIBA_LABELS[n]
+                stage_section_map.append((n, k1, k2, label))
     else:
-        stage_section_map = [
-            (1, 'stage 1','discovery',   'Phase 1 — Discovery and strategy'),
-            (2, 'stage 2','concept',     'Phase 2 — Concept design'),
-            (3, 'stage 3','development', 'Phase 3 — Design development'),
-            (4, 'stage 4','production',  'Phase 4 — Production and delivery'),
-        ]
+        PHASE_LABELS = {
+            1: ('stage 1','discovery',   'Phase 1 — Discovery and strategy'),
+            2: ('stage 2','concept',     'Phase 2 — Concept design'),
+            3: ('stage 3','development', 'Phase 3 — Design development'),
+            4: ('stage 4','production',  'Phase 4 — Production and delivery'),
+        }
+        stage_section_map = [(n, *PHASE_LABELS[n]) for n in sorted(stage_nums) if n in PHASE_LABELS]
+
     for num, k1, k2, label in stage_section_map:
-        if num in stage_nums:
-            txt = find_section(sections, k1, k2, 'stage '+str(num))
-            if txt:
-                slide_stage_detail(prs, 'Our methodology', label, txt, accent)
+        txt = find_section(sections, k1, k2, 'stage '+str(num))
+        if txt:
+            slide_stage_detail(prs, 'Our methodology', label, txt, accent)
 
     # Fees
     fees_stages = [

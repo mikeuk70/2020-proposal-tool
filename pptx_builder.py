@@ -246,11 +246,19 @@ def slide_hello(prs, body, accent):
     _rule(slide, Inches(0.5), Inches(0.88), W - Inches(1.0))
 
     # "Hello." headline — bold, left, with full stop
-    tb_h = slide.shapes.add_textbox(Inches(0.5), Inches(0.94), Inches(5), Inches(0.62))
+    # Extract "Hello [Name]" from first line of body if present
+    lines_all = [l.strip() for l in body.splitlines() if l.strip()]
+    hello_headline = 'Hello.'
+    for line in lines_all[:2]:
+        if line.lower().startswith('hello '):
+            hello_headline = line.rstrip('.,')
+            break
+
+    tb_h = slide.shapes.add_textbox(Inches(0.5), Inches(0.94), Inches(9), Inches(0.62))
     p_hh = tb_h.text_frame.paragraphs[0]
     p_hh.alignment = PP_ALIGN.LEFT
     r_h = p_hh.add_run()
-    r_h.text = 'Hello.'
+    r_h.text = hello_headline
     r_h.font.name = F_HEAD; r_h.font.size = Pt(30)
     r_h.font.bold = True; r_h.font.color.rgb = BLACK
 
@@ -682,8 +690,13 @@ def build_pptx_clean(sections, meta, output_path):
     # 1. Cover
     slide_cover(prs, venue, client, contact, role, date_s, accent)
 
-    # 2. Hello
+    # 2. Hello / cover letter
     cover_txt = find_section(sections,'cover letter','cover','hello')
+    # Prepend "Hello [Name]" if not already in text (fallback)
+    if cover_txt and not cover_txt.lower().startswith('hello '):
+        first_name = contact.split()[0] if contact else ''
+        if first_name:
+            cover_txt = f'Hello {first_name}\n\n' + cover_txt
     slide_hello(prs, cover_txt, accent)
 
     # 3. Brief

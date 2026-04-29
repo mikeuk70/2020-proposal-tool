@@ -635,60 +635,67 @@ Meetings & Presentations:
 Rules:
 - Write to THIS brief. No generic hospitality boilerplate.
 - Use "the club", "the venue", "the project" — not the client name
-- Reference specific spaces and tiers from the brief
+- Reference specific spaces, tiers and named consultants from the brief
 - No em dashes. Short sentences. Active voice.
-- If RIBA stages have sub-divisions (2.1, 2.2 etc), structure the response around them
+- If RIBA stages have sub-divisions (2.1, 2.2 etc), structure around them
+- Do NOT use markdown formatting — no asterisks, no bold (**text**), no headers (#)
+- Write the four section labels (Objective:, Process:, Deliverables:, Meetings & Presentations:) as plain text on their own line
+- The Meetings section must suggest specific meeting types and cadence — not just "[CONFIRM WITH CLIENT]"
 
 {ctx}"""
 
 
 SECTIONS = [
-        ('cover',   'Cover letter',
+            ('cover',   'Cover letter',
      '''Write the cover letter for this 20.20 proposal. It appears as the "Hello" slide.
 
-Headline: "Hello [first name of contact]" — NOT "Hello." — use the contact's first name directly in the headline.
-If there are two contacts, write "Hello [first name] and [first name]".
+First line must be: Hello [first name of contact] (no full stop, no "Dear")
+If two contacts: Hello [Name] and [Name]
 
-Format:
-- Headline: Hello [Name] (this goes on the slide as the large heading — write it as the first line)
-- Then: "Dear [Name]," on the next line
-- 3-4 short paragraphs, no more than 4 sentences each
-- Sign off: "Kind regards," then "The 20.20 team"
+Then: Dear [Name], (on a new line, this is the actual letter salutation)
 
-Paragraph 1: A personal, warm but direct opening. Reference something specific about this project or venue. If this is a continuation of previous work or a rebrief, acknowledge that directly and warmly.
+Write 3-4 SHORT paragraphs. Maximum 3 sentences each. No filler.
 
-Paragraph 2: What this proposal contains — the specific areas, stages or phases covered, what we are committing to deliver.
+If this is a CONTINUATION or REBRIEF (continuation=yes or prior stages noted):
+  Para 1: Warmly acknowledge the prior relationship and work done. Be specific if prior stages are known.
+  Para 2: What this proposal covers — the specific stages/phases, the specific spaces or areas.
+  Para 3: What we need from the client to deliver it (clear decisions, access, timescale).
+  Para 4 (optional): Brief confident close.
 
-Paragraph 3: What we need from the client to make it work — decisions required, access needed, timescales to respect.
+If this is a NEW brief:
+  Para 1: What drew 20.20 to this project — something specific about the venue or brief.
+  Para 2: What this proposal covers.
+  Para 3: What we need from the client.
 
-Paragraph 4: A short confident close.
+Sign off: "Kind regards," on its own line, then "The 20.20 team" on the next line.
 
 Rules:
-- Short sentences. Active voice. No em dashes.
-- Avoid: leveraging, seamless, holistic, transformative, deliverables-led
-- The client organisation name may appear once — this is the only section where it does
-- Do NOT add stage labels, bullet points or headings — just flowing letter prose
+- No markdown. No asterisks. No bullet points.
+- Short sentences. No em dashes. Direct tone.
+- The client name or venue name appears at most once.
+- Do NOT write generic agency positioning paragraphs about 20.20's methodology.
 
 {ctx}'''),
     ('brief',   'Your brief',
-     '''Write "Your brief" — this reflects back our understanding of what the client told us.
+     '''Write the "Your brief" section. This shows the client we listened and understood exactly what they said.
 
-This section should be SPECIFIC not strategic. Quote or closely paraphrase what the brief says.
-Name the actual spaces (e.g. "The James Herriot Restaurant", "Platinum Suite", "Board Room").
-Include actual numbers where given (capacity, target revenue, budget range, season window).
-Reference the specific challenges they have raised (existing problems, style preferences, dislikes).
+This section must be SPECIFIC and VERBATIM where possible. Do NOT write a strategic analysis.
 
 Structure:
-- Opening paragraph: the overall project and commercial context (2-3 sentences)
-- Then one short paragraph per key space or area being designed, covering:
-  - Name of space and its position in the hospitality hierarchy
-  - Current problem or opportunity
-  - Specific requirements from the brief (seating, F&B, atmosphere, operational need)
-- If spaces are unknown or not named in the brief, acknowledge this
-- If the brief has gaps (budget not stated, scope unclear), flag them with [CONFIRM WITH CLIENT: ...]
+- Para 1 (2-3 sentences): The overall project in plain commercial terms. Include any specific numbers from the brief (capacity, revenue targets, budget if stated).
+- Then one short paragraph per KEY SPACE or AREA, in order of importance. For each:
+  * Name the space exactly as the brief names it
+  * State its tier/level in the hospitality hierarchy
+  * State its capacity or commercial purpose
+  * Note any specific requirement, constraint or client preference mentioned
 
-Use "the club" or "the venue" — not the client name.
-Write as 20.20 reflecting the brief back — confident, specific, no generic filler.
+If the brief names constraints (fixed lounge sizes, seat positions, kitchen areas that cannot move), state them.
+If the client mentioned dislikes or things to avoid, include them.
+If spaces are not named in the brief, acknowledge this and note what IS known.
+
+Use "the club" or "the venue" not the client name.
+No markdown. No bold text. No bullet points — write in short paragraphs.
+Flag anything that needs confirming with: [CONFIRM WITH CLIENT: what needs clarifying]
 
 {ctx}'''),
     ('stage1',  'Stage 1 — Strategic framework',

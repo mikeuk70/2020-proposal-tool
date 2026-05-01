@@ -7,6 +7,81 @@ import os, json, uuid, threading, queue, time, base64, re, copy, zipfile, tempfi
 import anthropic
 from flask import Flask, request, jsonify, send_file, Response
 from pptx_builder import build_pptx_clean
+def build_docx(sections, meta):
+    """Build a clean Word document from generated sections for team review and sharing."""
+    from docx import Document as DocxDocument
+    from docx.shared import Pt, Cm, RGBColor
+    import tempfile
+
+    doc = DocxDocument()
+    for sec in doc.sections:
+        sec.top_margin = sec.bottom_margin = sec.left_margin = sec.right_margin = Cm(2.5)
+
+    doc.styles['Normal'].font.name = 'Arial'
+    doc.styles['Normal'].font.size = Pt(11)
+    for lvl, sz in [('Heading 1', 18), ('Heading 2', 13)]:
+        s = doc.styles[lvl]
+        s.font.name = 'Arial'; s.font.size = Pt(sz); s.font.bold = True
+        s.font.color.rgb = RGBColor(0x11, 0x14, 0x18)
+
+    def _c(t):
+        if not t: return ''
+        t = re.sub(r'\*\*([^*]+)\*\*', r'\1', t)
+        t = re.sub(r'\*([^*]+)\*', r'\1', t)
+        t = re.sub(r'^#{1,4}\s*', '', t, flags=re.MULTILINE)
+        return t.strip()
+
+    def add_body(body):
+        for line in _c(body).splitlines():
+            s = line.strip()
+            if not s: continue
+            if re.match(r'^(Objective|Process|Deliverables|Meetings[^:]*|Presentations):?\s*$', s, re.I):
+                doc.add_heading(s.rstrip(':'), level=2)
+            elif s.startswith(('-', '\u2022', '*')) or re.match(r'^\d+[.):]', s):
+                text = re.sub(r'^[-\u2022*]\s*|^\d+[.):]+\s*', '', s)
+                p = doc.add_paragraph(style='List Bullet')
+                p.paragraph_format.left_indent = Cm(0.5)
+                run = p.add_run(text); run.font.name = 'Arial'; run.font.size = Pt(11)
+            else:
+                p = doc.add_paragraph(); run = p.add_run(s)
+                run.font.name = 'Arial'; run.font.size = Pt(11)
+                p.paragraph_format.space_after = Pt(6)
+
+    # Title block
+    tp = doc.add_paragraph()
+    tr = tp.add_run(meta.get('venue', 'Proposal'))
+    tr.font.name = 'Arial'; tr.font.size = Pt(26); tr.font.bold = True
+    tr.font.color.rgb = RGBColor(0x11, 0x14, 0x18)
+
+    sp = doc.add_paragraph()
+    sr = sp.add_run('Hospitality design proposal')
+    sr.font.size = Pt(13); sr.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+
+    details = [meta.get('client','')]
+    if meta.get('contact'): details.append('Prepared for ' + meta['contact'] + (', ' + meta['role'] if meta.get('role') else ''))
+    if meta.get('date'): details.append(meta['date'])
+    dp = doc.add_paragraph('  |  '.join(d for d in details if d))
+    if dp.runs: dp.runs[0].font.size = Pt(10); dp.runs[0].font.color.rgb = RGBColor(0x88,0x88,0x88)
+
+    cp = doc.add_paragraph('CONFIDENTIAL  \u00a9  20.20 Limited 2026')
+    if cp.runs: cp.runs[0].font.size = Pt(8.5); cp.runs[0].font.color.rgb = RGBColor(0xAA,0xAA,0xAA)
+    doc.add_page_break()
+
+    for sec in sections:
+        body = sec.get('body','')
+        if not body.strip(): continue
+        heading = sec.get('heading', sec.get('id','').replace('_',' ').title())
+        doc.add_heading(heading, level=1)
+        add_body(body)
+        doc.add_paragraph()
+
+    tmp = tempfile.mkdtemp(prefix='2020_docx_')
+    slug = re.sub(r'[^a-zA-Z0-9]+', '_', meta.get('venue','Proposal'))
+    path = os.path.join(tmp, f'{slug}_20.20_Proposal.docx')
+    doc.save(path)
+    return path
+
+
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 20 * 1024 * 1024  # 20MB max upload
@@ -980,7 +1055,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
             if not os.path.exists(pptx_path):
                 raise FileNotFoundError('PowerPoint was not created')
             update_job(job_id, pptx_path=pptx_path, status='done')
-            progress('Done — click Download PowerPoint', 100)
+            progress('Done — click Download PowerPoint or Word Doc', 100)
         except Exception as pptx_err:
             import traceback
             err_detail = traceback.format_exc()
@@ -1324,6 +1399,9 @@ textarea:focus{border-color:var(--nv)}
         <button class="btn btn-gold" id="download-btn" onclick="downloadPPTX()">
           ↓ Download PowerPoint
         </button>
+        <button class="btn btn-outline" id="download-docx-btn" onclick="downloadDocx()" style="display:none">
+          ↓ Download Word Doc
+        </button>
         <button class="btn btn-outline" onclick="rebuildAndDownload()">
           ↓ Rebuild from edited sections
         </button>
@@ -1464,9 +1542,11 @@ async function pollStatus() {
         if (data.pptx_ready) {
           dlBtn.disabled = false;
           dlBtn.textContent = '↓ Download PowerPoint';
+          document.getElementById('download-docx-btn').style.display = 'inline-block';
         } else {
           dlBtn.disabled = true;
           dlBtn.textContent = 'PowerPoint unavailable — use Rebuild';
+          document.getElementById('download-docx-btn').style.display = 'inline-block';
           // Show error detail
           var rs = document.getElementById('rebuild-status');
           rs.style.display = 'block';
@@ -1603,6 +1683,11 @@ function collectSections() {
 function downloadPPTX() {
   if (!currentJobId) return;
   window.location.href = '/download/' + currentJobId;
+}
+
+function downloadDocx() {
+  if (!currentJobId) return;
+  window.location.href = '/download-docx/' + currentJobId;
 }
 
 async function rebuildAndDownload() {
@@ -1774,6 +1859,25 @@ def rebuild():
     except Exception as e:
         import traceback
         return jsonify({'error': str(e), 'detail': traceback.format_exc()[-500:]}), 500
+
+@app.route('/download-docx/<job_id>')
+def download_docx(job_id):
+    job = get_job(job_id)
+    if not job:
+        return 'Job not found', 404
+    sections = job.get('sections', [])
+    meta     = job.get('meta', {})
+    if not sections:
+        return 'No content yet', 400
+    try:
+        path = build_docx(sections, meta)
+        slug = re.sub(r'[^a-zA-Z0-9]+', '_', meta.get('venue', 'Proposal'))
+        return send_file(path, as_attachment=True,
+                         download_name=f'{slug}_20.20_Proposal.docx',
+                         mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    except Exception as e:
+        return f'Error building Word doc: {e}', 500
+
 
 @app.route('/download/<job_id>')
 def download(job_id):

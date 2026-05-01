@@ -740,7 +740,9 @@ def build_context(meta, spaces_text=''):
     if meta.get('role'): contact_line += f", {meta['role']}"
     if second: contact_line += f" and {second}"
 
+    is_riba_flag = meta.get('is_riba','yes').lower()
     ctx = f"PROJECT: {meta.get('venue','')}\n"
+    ctx += f"RIBA STAGED PROJECT: {'YES — respond using RIBA stage structure and terminology' if is_riba_flag == 'yes' else 'NO — this is a phase-based or single-scope project, do not use RIBA stage references'}\n"
     ctx += f"CLIENT: {meta.get('client','')}\n"
     ctx += f"CONTACT: {contact_line}\n"
     if meta.get('lead_architect'): ctx += f"LEAD ARCHITECT/DESIGN TEAM: {meta['lead_architect']}\n"
@@ -793,6 +795,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
         extract_prompt = (
             'Read this client brief, ITT or scope document carefully. Extract ALL available information. Return ONLY valid JSON with NO markdown or explanation.\n'
             '{\n'
+            '"is_riba": "yes or no. Determine this first. yes = RIBA Plan of Work with numbered stages, architect-led newbuild or refurbishment. no = single space, sponsor lounge, branding, arena, or no RIBA stage references in the brief",\n'
             '"brief_type": "newbuild | refurb | single_space | sponsor | arena | continuation | itt",\n'
             '"brief_source": "Direct approach | Via architect or PM | Formal open tender (ITT) | Referral | Repeat client | Unknown",\n'
             '"continuation": "yes | no",\n'
@@ -841,6 +844,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
         update_job(job_id, extracted=ex)
 
         meta = {
+            'is_riba':               ex.get('is_riba', 'yes'),
             'client':                ex.get('client', ''),
             'venue':                 ex.get('venue', ''),
             'contact':               ex.get('primary_contact', ''),

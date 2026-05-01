@@ -173,7 +173,8 @@ def _heading(slide, text, x=None, y=None, w=None, size=26, colour=None, caps=Tru
 def _textbox(slide, paras, x, y, w, h, size=12, colour=None):
     """paras: list of (type, text) — 'prose', 'bullet', 'bold'"""
     tb = slide.shapes.add_textbox(x, y, w, h)
-    tf = tb.text_frame; tf.word_wrap = True
+    tf = tb.text_frame
+    tf.word_wrap = True
     first = True
     for typ, text in paras:
         if not text.strip(): continue
@@ -389,7 +390,8 @@ def slide_process_summary(prs, stages, accent):
     # One-line intro
     tb_i = slide.shapes.add_textbox(Inches(0.5), Inches(1.68), W-Inches(1.0), Inches(0.38))
     r_i = tb_i.text_frame.paragraphs[0].add_run()
-    r_i.text = 'Our process is structured across ' + str(len(stages)) + ' stages, each with clear deliverables and agreed review points.'
+    n_stages = len(stages)
+    r_i.text = f'Our process is structured across {n_stages} {"stage" if n_stages == 1 else "stages"}, each with clear deliverables and agreed review points.'
     r_i.font.name = F_BODY; r_i.font.size = Pt(12); r_i.font.color.rgb = MID
 
     # Dark RIBA bar
@@ -457,14 +459,17 @@ def slide_stage_detail(prs, section_label, stage_title, body, accent):
     _rule(slide, Inches(0.5), Inches(0.92), W-Inches(1.0))
     _heading(slide, stage_title, y=Inches(0.96), size=24)
 
-    # Intro line
+    # Intro line — keep to 2 sentences max, scale if long
     intro = _prose(body, 2)
+    if intro and len(intro) > 300:
+        intro = _prose(body, 1)
     if intro:
         tb_i = slide.shapes.add_textbox(Inches(0.5), Inches(1.68), W-Inches(1.0), Inches(0.42))
         tf_i = tb_i.text_frame; tf_i.word_wrap = True
         r_i = tf_i.paragraphs[0].add_run()
         r_i.text = intro
-        r_i.font.name = F_BODY; r_i.font.size = Pt(12); r_i.font.color.rgb = MID
+        intro_size = 11 if len(intro) > 200 else 12
+        r_i.font.name = F_BODY; r_i.font.size = Pt(intro_size); r_i.font.color.rgb = MID
 
     _rule(slide, Inches(0.5), Inches(2.16), W-Inches(1.0))
 
@@ -507,6 +512,18 @@ def slide_stage_detail(prs, section_label, stage_title, body, accent):
                           else [('bullet',b) for b in default_meetings]),
     ]
 
+    # Scale font size down if content is heavy — prevents overflow
+    total_items = sum(len(items) for _, items in cols)
+    total_chars = sum(len(c) for _, items in cols for _, c in items)
+    if total_items > 24 or total_chars > 1800:
+        body_size = 8.5
+    elif total_items > 18 or total_chars > 1400:
+        body_size = 9.5
+    elif total_items > 12 or total_chars > 1000:
+        body_size = 10
+    else:
+        body_size = 10.5
+
     for i, (col_label, items) in enumerate(cols):
         x = Inches(0.5) + i * col_w
         # Column heading
@@ -517,7 +534,7 @@ def slide_stage_detail(prs, section_label, stage_title, body, accent):
         # Divider
         if i < 3:
             _box(slide, x + col_w - Inches(0.06), col_start, Inches(0.01), col_h, RULE)
-        _textbox(slide, items, x, col_start + Inches(0.28), col_w - Inches(0.1), col_h - Inches(0.28), size=10.5)
+        _textbox(slide, items, x, col_start + Inches(0.28), col_w - Inches(0.1), col_h - Inches(0.28), size=body_size)
 
     _footer(slide)
 
@@ -682,17 +699,31 @@ STAGES_PHASE = [
      'deliverables':['Print-ready artwork files','Installation drawings','Supplier packs','Quality sign-off checklist']},
 ]
 
-def get_stage_defs(brief_type, riba_stages):
-    """Return appropriate stage definitions based on brief type."""
-    bt = (brief_type or '').lower()
-    riba = (riba_stages or '').upper()
-    # Use phase-based for non-RIBA brief types
-    if any(x in bt for x in ('arena','single','sponsor','brand','one space','lounge','suite')):
+def get_stage_defs(brief_type, riba_stages, is_riba_flag='yes'):
+    """
+    Return appropriate stage definitions based on brief type.
+    is_riba_flag is the explicit field extracted from the brief — this is the primary decision.
+    brief_type and riba_stages are used as fallbacks only.
+    """
+    # 1. Explicit is_riba field from extraction — most reliable
+    if is_riba_flag and is_riba_flag.lower() in ('no', 'false', '0'):
         return STAGES_PHASE, False
-    # Use RIBA if explicitly mentioned
-    if 'riba' in riba or any(x in bt for x in ('newbuild','refurb','multi','full')):
+    if is_riba_flag and is_riba_flag.lower() in ('yes', 'true', '1'):
         return STAGES_RIBA, True
-    # Default: RIBA for anything with multiple stages, phase for single
+
+    # 2. Fallback: check if riba_stages field has content
+    riba = (riba_stages or '').upper()
+    if 'RIBA' in riba or 'STAGE' in riba:
+        return STAGES_RIBA, True
+
+    # 3. Fallback: brief_type keywords
+    bt = (brief_type or '').lower()
+    if any(x in bt for x in ('arena','single','sponsor','brand','lounge','suite')):
+        return STAGES_PHASE, False
+    if any(x in bt for x in ('newbuild','refurb','multi','full','itt')):
+        return STAGES_RIBA, True
+
+    # 4. Default to RIBA — safer assumption for stadium/hospitality projects
     return STAGES_RIBA, True
 
 def build_pptx_clean(sections, meta, output_path):
@@ -710,7 +741,8 @@ def build_pptx_clean(sections, meta, output_path):
 
     # Work out which stages to include from brief type and riba_stages
     brief_type = meta.get('brief_type','')
-    stage_defs, is_riba = get_stage_defs(brief_type, riba)
+    is_riba_flag = meta.get('is_riba', 'yes')
+    stage_defs, is_riba = get_stage_defs(brief_type, riba, is_riba_flag)
 
     stage_nums = []
     if riba:
@@ -787,17 +819,54 @@ def build_pptx_clean(sections, meta, output_path):
         if txt:
             slide_stage_detail(prs, 'Our methodology', label, txt, accent)
 
+    # Always include the stage456 section if it was generated and isn't already covered
+    # This handles cases where riba_stages only mentions stage 3 but stage 4+ was scoped
+    already_included = [num for num, k1, k2, label in stage_section_map if 4 <= num <= 6]
+    if not already_included:
+        if is_riba:
+            later_label = 'Stages 4, 5 and 6' if all(n in stage_nums for n in [4,5,6]) else 'Stage 4 — Design intent and artwork'
+        else:
+            later_label = 'Phase 4 — Production and delivery'
+        later_txt = find_section(sections, 'stage456', 'stage 4', 'stages 4', 'design intent', 'phase 4', 'production')
+        if later_txt and len(later_txt.strip()) > 50:
+            slide_stage_detail(prs, 'Our methodology', later_label, later_txt, accent)
+
     # Fees
-    fees_stages = [
-        {'title':'Strategic framework','sub':'Workshop, site visit and proposition',
-         'fee':'[FEE: TBC]','timing':'2-3 weeks','invoicing':'100% at start of stage'},
-        {'title':'Concept design','sub':'Layouts, materials, CGI visuals',
-         'fee':'[FEE: TBC]','timing':'4-6 weeks','invoicing':'50% at start, 50% at completion'},
-        {'title':'Design development','sub':'Sample boards and concept freeze',
-         'fee':'[FEE: TBC]','timing':'6-8 weeks','invoicing':'50% at start, 50% at completion'},
-        {'title':'Design intent and artwork','sub':'Drawing pack and graphic artwork',
-         'fee':'[FEE: TBC]','timing':'8-12 weeks','invoicing':'50% at start, 50% at completion'},
-    ]
+    # Build fees rows from the actual active stages, not a hardcoded list
+    FEES_SUBS = {
+        1: ('Strategic framework',      'Workshop, site visit and proposition', '2-3 weeks', '100% at start of stage'),
+        2: ('Concept design',           'Layouts, materials, CGI visuals',      '4-6 weeks', '50% at start, 50% at completion'),
+        3: ('Design development',       'Sample boards and concept freeze',     '6-8 weeks', '50% at start, 50% at completion'),
+        4: ('Design intent and artwork','Drawing pack and graphic artwork',      '8-12 weeks','50% at start, 50% at completion'),
+        5: ('Coordination',             'On-site guardianship and site visits',  'Programme dependent','Invoiced monthly'),
+        6: ('Handover',                 'Snagging and practical completion',     '2 weeks',   '100% at completion'),
+    }
+    FEES_SUBS_PHASE = {
+        1: ('Discovery and strategy',   'Brief audit, propositions, naming',     '2-3 weeks', '100% at start of stage'),
+        2: ('Concept design',           'Space planning, mood boards, CGI',      '4-6 weeks', '50% at start, 50% at completion'),
+        3: ('Design development',       'Sample boards and concept freeze',      '4-6 weeks', '50% at start, 50% at completion'),
+        4: ('Production and delivery',  'Artwork files, installation drawings',  '6-10 weeks','50% at start, 50% at completion'),
+    }
+    fees_lookup = FEES_SUBS if is_riba else FEES_SUBS_PHASE
+    fees_stages = []
+    nums_for_fees = list(stage_nums)
+    # Always include the later stages if stage456 section exists
+    if not already_included and find_section(sections,'stage456','stage 4','stages 4','phase 4'):
+        if is_riba:
+            nums_for_fees = sorted(set(nums_for_fees + [4]))
+        else:
+            nums_for_fees = sorted(set(nums_for_fees + [4]))
+    for n in sorted(set(nums_for_fees)):
+        if n in fees_lookup:
+            title, sub, timing, invoicing = fees_lookup[n]
+            fees_stages.append({'title': title, 'sub': sub, 'fee': '[FEE: TBC]',
+                                 'timing': timing, 'invoicing': invoicing})
+    # If 4+5+6 all present, collapse to one row
+    if is_riba and all(n in nums_for_fees for n in [4,5,6]):
+        fees_stages = [f for f in fees_stages if f['title'] not in ('Coordination','Handover')]
+        fees_stages.append({'title':'Stages 4, 5 and 6','sub':'Design intent through handover',
+                             'fee':'[FEE: TBC]','timing':'Programme dependent',
+                             'invoicing':'Invoiced monthly or per milestone'})
     slide_fees(prs, fees_stages, accent)
 
     # Next steps

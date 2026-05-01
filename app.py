@@ -632,15 +632,21 @@ Deliverables:
 Meetings & Presentations:
 [3-5 bullet points — specific meetings with the design team, architect and client. Reference Teams or in-person based on what the brief says]
 
-Rules:
-- Write to THIS brief. No generic hospitality boilerplate.
-- Use "the club", "the venue", "the project" — not the client name
-- Reference specific spaces, tiers and named consultants from the brief
-- No em dashes. Short sentences. Active voice.
-- If RIBA stages have sub-divisions (2.1, 2.2 etc), structure around them
-- Do NOT use markdown formatting — no asterisks, no bold (**text**), no headers (#)
-- Write the four section labels (Objective:, Process:, Deliverables:, Meetings & Presentations:) as plain text on their own line
-- The Meetings section must suggest specific meeting types and cadence — not just "[CONFIRM WITH CLIENT]"
+Quality requirements — these are mandatory:
+
+1. RESPOND TO ALL KEY REQUIREMENTS: Every requirement and deliverable the client stated in the brief must be addressed in this stage section. Do not omit anything they asked for. If the brief specifies a particular output (e.g. fly-throughs, a specific report format, a named deliverable), it must appear in the Deliverables list.
+
+2. PROPORTIONATE RESPONSE: Give more detail on the things the brief emphasises. If the client spent a paragraph on bar positioning, address it properly. If they flagged a specific constraint, acknowledge it. Weight your response to match the importance placed on topics in the brief.
+
+3. USE THE CLIENT'S TERMINOLOGY: Use the exact words and phrases from the brief. If they call it "the James Herriot Restaurant", use that name — not "the restaurant". If they say "Bronze, Silver, Gold", use those exact tier names. If they refer to "the Demand and Revenue Assessment", use that phrase. Mirror their technical and factual language precisely. Then write in 20.20 tone of voice around it — confident, direct, commercially aware.
+
+4. TIMINGS: Use realistic design timings. Stage 1 / Phase 1 = 2-3 weeks. Stage 2 / Phase 2 = 4-6 weeks. Stage 3 / Phase 3 = 6-8 weeks. Stage 4 / Phase 4 = 8-12 weeks. Stages 5-6 = programme dependent. Do not use 1-2 week timings — these are too short.
+
+Format rules:
+- No markdown. No asterisks. No bold (**text**). No headers (#).
+- Write the four section labels as plain text on their own line followed by a colon.
+- The Meetings section must name specific meeting types and cadence — not a placeholder.
+- Use "the club", "the venue", "the project" — not the client name.
 
 {ctx}"""
 
@@ -674,6 +680,8 @@ Rules:
 - Short sentences. No em dashes. Direct tone.
 - The client name or venue name appears at most once.
 - Do NOT write generic agency positioning paragraphs about 20.20's methodology.
+- Use the specific language from the brief — if they named a programme or a deadline, reference it.
+- Timings must be realistic: Stage 2 = 4-6 weeks, Stage 3 = 6-8 weeks — not 1-2 weeks.
 
 {ctx}'''),
     ('brief',   'Your brief',
@@ -695,6 +703,7 @@ If spaces are not named in the brief, acknowledge this and note what IS known.
 
 Use "the club" or "the venue" not the client name.
 No markdown. No bold text. No bullet points — write in short paragraphs.
+Use the EXACT TERMINOLOGY from the brief — if they name a space, use that exact name. If they give capacity figures or budget ranges, include them verbatim.
 Flag anything that needs confirming with: [CONFIRM WITH CLIENT: what needs clarifying]
 
 {ctx}'''),

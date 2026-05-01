@@ -98,6 +98,13 @@ def _bullets(txt, n=8):
         b = [c for t,c in _parse(txt) if t=='prose' and len(c)>20]
     return b[:n]
 
+def _all_bullets(txt):
+    """Return ALL bullet points — no cap. Used for slides so nothing is lost."""
+    b = [c for t,c in _parse(txt) if t=='bullet']
+    if not b:
+        b = [c for t,c in _parse(txt) if t=='prose' and len(c)>20]
+    return b
+
 def _section_of(txt, label):
     """Extract a named sub-section from structured text."""
     pattern = re.compile(
@@ -353,7 +360,7 @@ def slide_brief(prs, body, accent):
     # Right: remaining prose as bullets + any explicit bullets
     left_prose = prose_items[:3]
     right_prose = [('bullet', c) for t,c in prose_items[3:]]
-    right_bullets = bullet_items[:8]
+    right_bullets = bullet_items  # use all bullets
     right_items = right_prose + right_bullets
 
     if right_items:
@@ -461,14 +468,14 @@ def slide_stage_detail(prs, section_label, stage_title, body, accent):
 
     _rule(slide, Inches(0.5), Inches(2.16), W-Inches(1.0))
 
-    # Extract structured sections
+    # Extract structured sections — use ALL content, no caps
     obj_txt  = _section_of(body, 'Objective')  or _prose(body, 2)
     proc_txt = _section_of(body, 'Process')
     delv_txt = _section_of(body, 'Deliverables') or body
     meet_txt = _section_of(body, 'Meetings') or _section_of(body, 'Presentations')
 
     # Fall back: if no structured sections, split bullets across columns
-    all_bullets = _bullets(body, 16)
+    all_bullets = _all_bullets(body)
     if not proc_txt and not meet_txt:
         third = max(1, len(all_bullets) // 3)
         obj_bullets  = [obj_txt] if obj_txt and obj_txt != _prose(body,2) else all_bullets[:third]
@@ -477,9 +484,9 @@ def slide_stage_detail(prs, section_label, stage_title, body, accent):
         meet_bullets = []
     else:
         obj_bullets  = [obj_txt] if obj_txt else []
-        proc_bullets = _bullets(proc_txt, 8) if proc_txt else []
-        delv_bullets = _bullets(delv_txt, 8) if delv_txt else all_bullets
-        meet_bullets = _bullets(meet_txt, 4) if meet_txt else []
+        proc_bullets = _all_bullets(proc_txt) if proc_txt else []
+        delv_bullets = _all_bullets(delv_txt) if delv_txt else all_bullets
+        meet_bullets = _all_bullets(meet_txt) if meet_txt else []
 
     col_start = Inches(2.24)
     col_h     = H - col_start - Inches(0.35)
@@ -640,38 +647,38 @@ def find_section(sections, *keys):
 # RIBA-based proposals (newbuild, refurb, multi-stage)
 STAGES_RIBA = [
     {'number':1,'title':'Strategic framework','subtitle':'Understand and define',
-     'stage_label':'RIBA Stage 2','duration':'1 week',
+     'stage_label':'RIBA Stage 2','duration':'2-3 weeks',
      'deliverables':['Design principles per tier','Experience propositions','Naming and narratives','Design direction mood boards','Strategic report']},
     {'number':2,'title':'Concept design','subtitle':'Overarching look and feel',
-     'stage_label':'RIBA Stage 2','duration':'2 weeks',
+     'stage_label':'RIBA Stage 2','duration':'4-6 weeks',
      'deliverables':['GA plans and zoning','Materials and mood boards','Brand identities','CGI visuals (min 2 per space)','Concept report']},
     {'number':3,'title':'Design development','subtitle':'Refine and finalise',
-     'stage_label':'RIBA Stage 2','duration':'2 weeks',
+     'stage_label':'RIBA Stage 2','duration':'6-8 weeks',
      'deliverables':['Finalised GA plan and RCP','Sample boards','Furniture selection','Concept freeze','Design specification']},
     {'number':4,'title':'Design intent and artwork','subtitle':'Technical production',
-     'stage_label':'RIBA Stage 3','duration':'4 weeks',
+     'stage_label':'RIBA Stage 3','duration':'8-12 weeks',
      'deliverables':['Full drawing pack','Elevations and sections','FFE schedules','Graphic artwork files','Specification document']},
     {'number':5,'title':'Coordination','subtitle':'On-site guardianship',
      'stage_label':'RIBA Stages 4-5','duration':'Programme dependent',
      'deliverables':['Contractor drawing review','Sample approvals','Site meetings','Value engineering support']},
     {'number':6,'title':'Handover','subtitle':'Completion and sign-off',
-     'stage_label':'RIBA Stage 6','duration':'1 week',
+     'stage_label':'RIBA Stage 6','duration':'2 weeks',
      'deliverables':['Site inspection','Snagging report','Practical completion sign-off']},
 ]
 
 # Phase-based proposals (arena, single space, sponsor, brand)
 STAGES_PHASE = [
     {'number':1,'title':'Discovery and strategy','subtitle':'Understand and define',
-     'stage_label':'Phase 1','duration':'1 week',
+     'stage_label':'Phase 1','duration':'2-3 weeks',
      'deliverables':['Project brief audit','Experience proposition','Design principles','Naming and narrative direction','Strategy document']},
     {'number':2,'title':'Concept design','subtitle':'Creative direction and look and feel',
-     'stage_label':'Phase 2','duration':'2 weeks',
+     'stage_label':'Phase 2','duration':'4-6 weeks',
      'deliverables':['Space planning and layout','Materials and mood boards','Brand identity direction','CGI visuals','Concept report']},
     {'number':3,'title':'Design development','subtitle':'Refine, specify and freeze',
-     'stage_label':'Phase 3','duration':'2 weeks',
+     'stage_label':'Phase 3','duration':'4-6 weeks',
      'deliverables':['Finalised design drawings','Sample boards','Furniture selection','Graphic artwork','Concept freeze document']},
     {'number':4,'title':'Production and delivery','subtitle':'Artwork and handover',
-     'stage_label':'Phase 4','duration':'4 weeks',
+     'stage_label':'Phase 4','duration':'6-10 weeks',
      'deliverables':['Print-ready artwork files','Installation drawings','Supplier packs','Quality sign-off checklist']},
 ]
 
@@ -783,13 +790,13 @@ def build_pptx_clean(sections, meta, output_path):
     # Fees
     fees_stages = [
         {'title':'Strategic framework','sub':'Workshop, site visit and proposition',
-         'fee':'[FEE: TBC]','timing':'1 week','invoicing':'100% at start of stage'},
+         'fee':'[FEE: TBC]','timing':'2-3 weeks','invoicing':'100% at start of stage'},
         {'title':'Concept design','sub':'Layouts, materials, CGI visuals',
-         'fee':'[FEE: TBC]','timing':'2 weeks','invoicing':'50% at start, 50% at completion'},
+         'fee':'[FEE: TBC]','timing':'4-6 weeks','invoicing':'50% at start, 50% at completion'},
         {'title':'Design development','sub':'Sample boards and concept freeze',
-         'fee':'[FEE: TBC]','timing':'2 weeks','invoicing':'50% at start, 50% at completion'},
+         'fee':'[FEE: TBC]','timing':'6-8 weeks','invoicing':'50% at start, 50% at completion'},
         {'title':'Design intent and artwork','sub':'Drawing pack and graphic artwork',
-         'fee':'[FEE: TBC]','timing':'4 weeks','invoicing':'50% at start, 50% at completion'},
+         'fee':'[FEE: TBC]','timing':'8-12 weeks','invoicing':'50% at start, 50% at completion'},
     ]
     slide_fees(prs, fees_stages, accent)
 

@@ -613,6 +613,29 @@ def slide_divider(prs, word, accent):
     r.font.name = F_HEAD; r.font.size = Pt(72); r.font.bold = True; r.font.color.rgb = WHITE
 
 
+def _split_title_desc(line, max_title_words=6):
+    """Split a single next-steps line into a short title and a description.
+    Model output varies in shape — sometimes 'Title: description', sometimes
+    'Title - description', sometimes just a long sentence with no separator.
+    Falls back to using the first few words as the title and the rest as the
+    description so body text is never silently dropped."""
+    line = line.strip().lstrip('0123456789.) ').strip()
+    for sep in [':', ' - ', '—', '–']:
+        if sep in line:
+            title, _, desc = line.partition(sep)
+            title = title.strip()
+            desc = desc.strip()
+            if title and desc:
+                return title, desc
+    # No separator — split on word count instead of losing the rest
+    words = line.split()
+    if len(words) <= max_title_words:
+        return line, ''
+    title = ' '.join(words[:max_title_words])
+    desc = ' '.join(words[max_title_words:])
+    return title, desc
+
+
 def slide_next_steps(prs, body, accent):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _bg(slide, WHITE); _logo(slide); _label(slide, 'Next steps', accent)
@@ -635,8 +658,12 @@ def slide_next_steps(prs, body, accent):
         r_n = tb_n.text_frame.paragraphs[0].add_run(); r_n.text = f'0{i+1}'
         r_n.font.name = F_HEAD; r_n.font.size = Pt(22); r_n.font.bold = True; r_n.font.color.rgb = accent
         _box(slide, x+Inches(0.18), Inches(2.56), Inches(1.5), Inches(0.025), accent)
-        title = bullets[i] if i < len(bullets) else defaults[i][0]
-        desc  = '' if i < len(bullets) else defaults[i][1]
+        if i < len(bullets):
+            title, desc = _split_title_desc(bullets[i])
+            if not desc:
+                desc = defaults[i][1]
+        else:
+            title, desc = defaults[i]
         tb_t = slide.shapes.add_textbox(x+Inches(0.18), Inches(2.62), cw-Inches(0.3), Inches(0.55))
         tb_t.text_frame.word_wrap = True
         r_t = tb_t.text_frame.paragraphs[0].add_run(); r_t.text = title

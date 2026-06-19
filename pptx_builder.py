@@ -6,7 +6,7 @@ Clean builds matching real 20.20 proposal layouts.
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.text import PP_ALIGN, MSO_AUTO_SIZE
 import re
 
 W = Inches(13.33)
@@ -175,6 +175,8 @@ def _textbox(slide, paras, x, y, w, h, size=12, colour=None):
     tb = slide.shapes.add_textbox(x, y, w, h)
     tf = tb.text_frame
     tf.word_wrap = True
+    tf.auto_size = MSO_AUTO_SIZE.NONE  # clip at assigned height rather than
+                                        # silently growing past the slide edge
     first = True
     for typ, text in paras:
         if not text.strip(): continue
@@ -449,29 +451,151 @@ def slide_process_summary(prs, stages, accent):
     _footer(slide)
 
 
-def slide_stage_detail(prs, section_label, stage_title, body, accent):
+_LINE_ESTIMATE_FONT_PATH = '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf'
+_line_estimate_font_cache = {}
+
+def _get_measure_font(size_pt):
+    """Cache PIL ImageFont objects per size — loading a font file repeatedly
+    is the dominant cost in line estimation otherwise."""
+    key = round(size_pt, 1)
+    if key not in _line_estimate_font_cache:
+        try:
+            from PIL import ImageFont
+            # Oversample 4x for measurement precision, scale back down after.
+            _line_estimate_font_cache[key] = ImageFont.truetype(_LINE_ESTIMATE_FONT_PATH, int(size_pt * 4))
+        except Exception:
+            _line_estimate_font_cache[key] = None
+    return _line_estimate_font_cache[key]
+
+
+def _wrap_line_count(text, usable_width_pt, size_pt):
+    """Simulate real word-wrapping using actual font metrics (Liberation Sans,
+    metric-compatible with Arial — the realistic fallback if the brand font
+    Filson Pro isn't installed wherever PowerPoint renders this deck). This
+    replaces a naive characters-per-line estimate, which was measured to be
+    unreliable: the same column width and font size produced meaningfully
+    different real chars-per-line depending on actual word lengths and
+    bullet indentation, things a flat character-count average can't capture."""
+    font = _get_measure_font(size_pt)
+    if font is None:
+        # Fallback if PIL/font unavailable — conservative flat estimate
+        chars_per_line = max(20, int(usable_width_pt / (size_pt * 0.5)))
+        return max(1, -(-len(text) // chars_per_line))
+
+    words = text.split(' ')
+    lines = 1
+    current = ''
+    for word in words:
+        test = (current + ' ' + word).strip() if current else word
+        bbox = font.getbbox(test)
+        width_pt = (bbox[2] - bbox[0]) / 4
+        if width_pt <= usable_width_pt or not current:
+            current = test
+        else:
+            lines += 1
+            current = word
+    return lines
+
+
+def _col_usable_width_pt(col_width_inches, is_bullet=True):
+    bullet_indent_in = 0.12 if is_bullet else 0.0
+    right_pad_in = 0.1
+    usable_in = max(col_width_inches - bullet_indent_in - right_pad_in, 0.3)
+    return usable_in * 72
+
+
+def _estimate_col_lines(items, col_width_inches, size):
+    """Estimate rendered line count for a column, used to detect overflow
+    before PowerPoint does (python-pptx has no layout engine, so text that
+    doesn't fit is silently clipped or overflows past the slide edge rather
+    than erroring or auto-paginating)."""
+    lines = 0
+    for typ, text in items:
+        if not text.strip():
+            continue
+        usable_pt = _col_usable_width_pt(col_width_inches, is_bullet=(typ == 'bullet'))
+        wrapped = _wrap_line_count(text, usable_pt, size)
+        lines += wrapped
+        if typ == 'bullet':
+            lines += 0.15  # small gap before each bullet
+    return lines
+
+
+def _split_items_for_overflow(items, max_lines, col_width_inches, size):
+    """Split a list of (type, text) column items into a 'fits on this slide'
+    part and an 'overflow, needs a continuation slide' part. Preserves
+    original order — once an item doesn't fit, every item after it also
+    goes to overflow, even if a later (shorter) item would technically fit
+    against the stale running total. Otherwise items can render out of
+    sequence between the main slide and its continuation."""
+    kept, overflow = [], []
+    running = 0
+    broke = False
+    for typ, text in items:
+        if not text.strip():
+            if not broke:
+                kept.append((typ, text))
+            else:
+                overflow.append((typ, text))
+            continue
+        usable_pt = _col_usable_width_pt(col_width_inches, is_bullet=(typ == 'bullet'))
+        wrapped = _wrap_line_count(text, usable_pt, size)
+        if typ == 'bullet':
+            wrapped += 0.15  # must match _estimate_col_lines exactly, or the
+                              # two functions disagree at the boundary and an
+                              # item that "fits" by one accounting method
+                              # silently doesn't fit by the other.
+        if not broke and (running + wrapped <= max_lines or not kept):
+            kept.append((typ, text))
+            running += wrapped
+        else:
+            broke = True
+            overflow.append((typ, text))
+    return kept, overflow
+
+
+def slide_stage_detail(prs, section_label, stage_title, body, accent, _continuation=False):
     """
     Detailed stage slide: Objective | Process | Deliverables | Meetings
     Four columns matching real 20.20 format.
+
+    If content is too long for one slide (common on multi-space briefs with
+    8+ named lounges/boxes), automatically continues onto a second slide
+    rather than clipping or shrinking text past the point of readability.
+    Returns the list of slides created (1 or 2).
     """
+    created = []
     slide = prs.slides.add_slide(prs.slide_layouts[6])
+    created.append(slide)
+    title = stage_title if not _continuation else f'{stage_title} (continued)'
     _bg(slide, WHITE); _logo(slide); _label(slide, section_label, accent)
     _rule(slide, Inches(0.5), Inches(0.92), W-Inches(1.0))
-    _heading(slide, stage_title, y=Inches(0.96), size=24)
+    _heading(slide, title, y=Inches(0.96), size=24)
 
-    # Intro line — keep to 2 sentences max, scale if long
-    intro = _prose(body, 2)
-    if intro and len(intro) > 300:
-        intro = _prose(body, 1)
-    if intro:
-        tb_i = slide.shapes.add_textbox(Inches(0.5), Inches(1.68), W-Inches(1.0), Inches(0.42))
-        tf_i = tb_i.text_frame; tf_i.word_wrap = True
-        r_i = tf_i.paragraphs[0].add_run()
-        r_i.text = intro
-        intro_size = 11 if len(intro) > 200 else 12
-        r_i.font.name = F_BODY; r_i.font.size = Pt(intro_size); r_i.font.color.rgb = MID
+    # Intro line — keep to 2 sentences max, scale if long. Skip on
+    # continuation slides so column space isn't eaten twice by the same intro.
+    # Height/positioning below the intro is dynamic: a long intro wraps to
+    # multiple lines and a fixed-height box was overlapping the column
+    # headers underneath it.
+    intro_bottom = Inches(2.16)
+    if not _continuation:
+        intro = _prose(body, 2)
+        if intro and len(intro) > 300:
+            intro = _prose(body, 1)
+        if intro:
+            intro_size = 11 if len(intro) > 200 else 12
+            full_width_pt = (W / 914400 - 1.0) * 72  # slide width minus 0.5in margins each side
+            wrapped_lines = _wrap_line_count(intro, full_width_pt, intro_size)
+            line_height_in = (intro_size * 1.22) / 72
+            intro_h = Inches(0.05 + line_height_in * wrapped_lines)
+            tb_i = slide.shapes.add_textbox(Inches(0.5), Inches(1.68), W-Inches(1.0), intro_h)
+            tf_i = tb_i.text_frame; tf_i.word_wrap = True
+            r_i = tf_i.paragraphs[0].add_run()
+            r_i.text = intro
+            r_i.font.name = F_BODY; r_i.font.size = Pt(intro_size); r_i.font.color.rgb = MID
+            intro_bottom = Inches(1.68) + intro_h + Inches(0.12)
 
-    _rule(slide, Inches(0.5), Inches(2.16), W-Inches(1.0))
+    _rule(slide, Inches(0.5), intro_bottom, W-Inches(1.0))
 
     # Extract structured sections — use ALL content, no caps
     obj_txt  = _section_of(body, 'Objective')  or _prose(body, 2)
@@ -493,9 +617,11 @@ def slide_stage_detail(prs, section_label, stage_title, body, accent):
         delv_bullets = _all_bullets(delv_txt) if delv_txt else all_bullets
         meet_bullets = _all_bullets(meet_txt) if meet_txt else []
 
-    col_start = Inches(2.24)
+    col_start = (intro_bottom + Inches(0.08)) if not _continuation else Inches(1.4)
     col_h     = H - col_start - Inches(0.35)
     col_w     = (W - Inches(1.0)) / 4
+    col_w_in  = col_w / 914400  # EMU to inches for the line-estimate helper
+    col_h_in  = col_h / 914400
     # Default meetings cadence if not specified in content
     default_meetings = [
         'Kick-off meeting and site visit at start of stage',
@@ -512,7 +638,7 @@ def slide_stage_detail(prs, section_label, stage_title, body, accent):
                           else [('bullet',b) for b in default_meetings]),
     ]
 
-    # Scale font size down if content is heavy — prevents overflow
+    # Scale font size down if content is heavy — prevents overflow up to a point
     total_items = sum(len(items) for _, items in cols)
     total_chars = sum(len(c) for _, items in cols for _, c in items)
     if total_items > 24 or total_chars > 1800:
@@ -524,7 +650,68 @@ def slide_stage_detail(prs, section_label, stage_title, body, accent):
     else:
         body_size = 10.5
 
-    for i, (col_label, items) in enumerate(cols):
+    # Overflow detection: even at the smallest font, some multi-space briefs
+    # produce more content than one slide's column height can hold. Rather
+    # than let PowerPoint silently clip text, split the overflow onto a
+    # continuation slide with the same layout. We size the split against the
+    # column that actually needs it (usually Deliverables) so short columns
+    # like Meetings aren't artificially truncated just because they share a
+    # uniform line cap with a much longer column.
+    line_height_in = (body_size * 1.22) / 72  # standard ~1.2x line-height multiplier
+    # Small safety margin: estimation uses Liberation Sans as a metric proxy
+    # for the brand font (Filson Pro), and line-height multipliers vary
+    # slightly by renderer. Real word-wrap simulation is now used for the
+    # character-level estimate, so this only needs to cover renderer/font
+    # variance, not estimation error.
+    max_lines = (col_h_in / line_height_in) * 0.92
+
+    def _col_line_estimate(items):
+        return _estimate_col_lines(items, col_w_in, body_size)
+
+    col_line_totals = [_col_line_estimate(items) for _, items in cols]
+    worst_col_idx = max(range(len(cols)), key=lambda i: col_line_totals[i])
+    needs_split = col_line_totals[worst_col_idx] > max_lines
+
+    overflow_cols = {}
+    if not needs_split:
+        fitted_cols = cols
+    else:
+        # Find how many items of the worst column fit, then carry the same
+        # *line-count fraction* across other columns so the split feels
+        # proportionate. Item count alone is the wrong axis — a column with
+        # 4 long bullets can occupy more vertical space than one with 8
+        # short bullets, so balancing on item count under-fills short-bullet
+        # columns and over-fills long-bullet ones.
+        worst_label, worst_items = cols[worst_col_idx]
+        kept_worst, overflow_worst = _split_items_for_overflow(worst_items, max_lines, col_w_in, body_size)
+        kept_worst_lines = _col_line_estimate(kept_worst)
+        keep_fraction = kept_worst_lines / max(1, col_line_totals[worst_col_idx])
+
+        fitted_cols = []
+        for label, items in cols:
+            if label == worst_label:
+                fitted_cols.append((label, kept_worst))
+                if overflow_worst:
+                    overflow_cols[label] = overflow_worst
+                continue
+            if not items:
+                fitted_cols.append((label, items))
+                continue
+            this_lines = _col_line_estimate(items)
+            if this_lines <= max_lines:
+                # This column fits on slide 1 in full regardless of the
+                # worst column's split — no reason to truncate it.
+                fitted_cols.append((label, items))
+                continue
+            # This column also overflows on its own — split it at the same
+            # proportion of its own line budget as the worst column used.
+            target_lines = this_lines * keep_fraction
+            kept, overflow = _split_items_for_overflow(items, target_lines, col_w_in, body_size)
+            fitted_cols.append((label, kept))
+            if overflow:
+                overflow_cols[label] = overflow
+
+    for i, (col_label, items) in enumerate(fitted_cols):
         x = Inches(0.5) + i * col_w
         # Column heading
         tb_h = slide.shapes.add_textbox(x, col_start - Inches(0.06), col_w - Inches(0.1), Inches(0.3))
@@ -537,6 +724,39 @@ def slide_stage_detail(prs, section_label, stage_title, body, accent):
         _textbox(slide, items, x, col_start + Inches(0.28), col_w - Inches(0.1), col_h - Inches(0.28), size=body_size)
 
     _footer(slide)
+
+    # If any column overflowed, build a continuation slide carrying just the
+    # overflow content (other columns padded empty so layout stays aligned).
+    if overflow_cols and not _continuation:
+        cont_cols_items = []
+        for label, _ in cols:
+            cont_cols_items.append((label, overflow_cols.get(label, [])))
+        # Re-run the same placement logic for the continuation slide directly,
+        # rather than recursing through body-text extraction again.
+        cont_slide = prs.slides.add_slide(prs.slide_layouts[6])
+        created.append(cont_slide)
+        cont_title = f'{stage_title} (continued)'
+        _bg(cont_slide, WHITE); _logo(cont_slide); _label(cont_slide, section_label, accent)
+        _rule(cont_slide, Inches(0.5), Inches(0.92), W-Inches(1.0))
+        _heading(cont_slide, cont_title, y=Inches(0.96), size=24)
+        _rule(cont_slide, Inches(0.5), Inches(1.4), W-Inches(1.0))
+        cont_col_start = Inches(1.6)
+        cont_col_h = H - cont_col_start - Inches(0.35)
+        for i, (col_label, items) in enumerate(cont_cols_items):
+            if not items:
+                continue
+            x = Inches(0.5) + i * col_w
+            tb_h = cont_slide.shapes.add_textbox(x, cont_col_start - Inches(0.06), col_w - Inches(0.1), Inches(0.3))
+            r_h = tb_h.text_frame.paragraphs[0].add_run()
+            r_h.text = col_label; r_h.font.name = F_HEAD; r_h.font.size = Pt(11)
+            r_h.font.bold = True; r_h.font.color.rgb = accent
+            if i < 3:
+                _box(cont_slide, x + col_w - Inches(0.06), cont_col_start, Inches(0.01), cont_col_h, RULE)
+            _textbox(cont_slide, items, x, cont_col_start + Inches(0.28), col_w - Inches(0.1),
+                     cont_col_h - Inches(0.28), size=body_size)
+        _footer(cont_slide)
+
+    return created
 
 
 def slide_fees(prs, stages_data, accent):

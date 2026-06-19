@@ -848,6 +848,55 @@ def build_context(meta, spaces_text=''):
     return ctx.strip()
 
 
+def repair_json(raw_str):
+    """Try progressively more aggressive repairs on near-valid JSON from the model.
+    Handles the most common failure: unescaped quotes/apostrophes inside string
+    values (club names, quoted brief language), which break json.loads with
+    'Expecting , delimiter' type errors."""
+    # Attempt 1: as-is
+    try:
+        return json.loads(raw_str)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 2: escape stray backslashes that aren't valid escape sequences
+    try:
+        fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw_str)
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 3: fix smart quotes / curly apostrophes inside values, which
+    # sometimes appear when the model echoes brief text verbatim
+    try:
+        fixed = raw_str.replace('\u2018', "'").replace('\u2019', "'")
+        fixed = fixed.replace('\u201c', '"').replace('\u201d', '"')
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 4: line-by-line repair — find the specific line/column json
+    # reports and escape an unescaped " or ' that isn't a field delimiter.
+    try:
+        fixed = raw_str
+        for _ in range(8):  # cap repair attempts to avoid infinite loop
+            try:
+                return json.loads(fixed)
+            except json.JSONDecodeError as e:
+                idx = e.pos
+                # If the character at the error position is an unescaped quote
+                # inside what looks like a string value, escape it and retry.
+                if idx < len(fixed) and fixed[idx] == '"':
+                    fixed = fixed[:idx] + '\\"' + fixed[idx+1:]
+                else:
+                    raise
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
+    return None
+
+
 def strip_html(txt):
     """Strip HTML tags from text — intel comes back with <cite> tags from web search."""
     if not txt:
@@ -869,6 +918,11 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
         progress('Reading the brief...', 5)
         extract_prompt = (
             'Read this client brief, ITT or scope document carefully. Extract ALL available information. Return ONLY valid JSON with NO markdown or explanation.\n'
+            'CRITICAL: every string value must be valid JSON. Escape all double quotes as \\" and avoid '
+            'using straight or curly apostrophes inside values where possible — rephrase rather than quote '
+            'verbatim if a club name or phrase contains an apostrophe (e.g. write "the venue" rather than '
+            'repeating a possessive club name with an apostrophe inside a string). Do not include literal '
+            'line breaks inside a string value — use a single space instead.\n'
             '{\n'
             '"is_riba": "yes or no. Determine this first. yes = RIBA Plan of Work with numbered stages, architect-led newbuild or refurbishment. no = single space, sponsor lounge, branding, arena, or no RIBA stage references in the brief",\n'
             '"brief_type": "newbuild | refurb | single_space | sponsor | arena | continuation | itt",\n'
@@ -915,7 +969,24 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
         m = re.search(r'\{[\s\S]*\}', raw)
         if not m:
             raise ValueError('Could not extract brief data from the document.')
-        ex = json.loads(m.group(0))
+        ex = repair_json(m.group(0))
+        if ex is None:
+            # Last resort: ask the model to re-emit the same JSON, valid this time
+            progress('Brief data needed a re-pass — retrying...', 8)
+            fix_resp = client.messages.create(
+                model='claude-sonnet-4-6',
+                max_tokens=1400,
+                messages=[{'role': 'user', 'content':
+                    'The following text should be valid JSON but failed to parse. '
+                    'Return ONLY the corrected, valid JSON with no markdown, no explanation, '
+                    'and all string values properly escaped (especially apostrophes and quotes):\n\n'
+                    + m.group(0)}]
+            )
+            fix_raw = fix_resp.content[0].text.replace('```json', '').replace('```', '').strip()
+            fix_m = re.search(r'\{[\s\S]*\}', fix_raw)
+            ex = repair_json(fix_m.group(0)) if fix_m else None
+            if ex is None:
+                raise ValueError('Could not parse brief data as JSON, even after a repair pass.')
         update_job(job_id, extracted=ex)
 
         meta = {

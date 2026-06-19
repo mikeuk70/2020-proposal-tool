@@ -793,7 +793,10 @@ Flag anything that needs confirming with: [CONFIRM WITH CLIENT: what needs clari
     ('fees',    'Fees and timings',
      'Write the fees section. List each stage with [FEE: TBC] for all figures. Note timings per stage. Fees are exclusive of VAT, 3rd party costs, general expenses and travel. Subject to contract.\n\n{ctx}'),
     ('nextsteps','Next steps',
-     'Write next steps as four numbered actions: review, feedback, site visit, appointment. Direct and confident. 1-2 sentences each. No client name.\n\n{ctx}'),
+     'Write next steps as four numbered actions: review, feedback, site visit, appointment. '
+     'Format each one as a short title followed by a colon, then a 1-2 sentence description, '
+     'for example: "Review this proposal: Share it with your team and flag any questions before we proceed." '
+     'Keep the title under 5 words. Direct and confident. No client name.\n\n{ctx}'),
 ]
 
 def build_context(meta, spaces_text=''):

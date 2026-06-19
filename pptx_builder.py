@@ -619,8 +619,8 @@ def slide_stage_detail(prs, section_label, stage_title, body, accent, _continuat
 
     col_start = (intro_bottom + Inches(0.08)) if not _continuation else Inches(1.4)
     col_h     = H - col_start - Inches(0.35)
-    col_w     = (W - Inches(1.0)) / 4
-    col_w_in  = col_w / 914400  # EMU to inches for the line-estimate helper
+    col_w_full = (W - Inches(1.0)) / 4
+    col_w_in_full = col_w_full / 914400
     col_h_in  = col_h / 914400
     # Default meetings cadence if not specified in content
     default_meetings = [
@@ -629,13 +629,14 @@ def slide_stage_detail(prs, section_label, stage_title, body, accent, _continuat
         'End-of-stage presentation and sign-off',
         'All documents issued via PDF; meetings in person or on Teams',
     ]
+    meetings_items = [('bullet',b) for b in meet_bullets] if meet_bullets \
+                      else [('bullet',b) for b in default_meetings]
     cols = [
         ('Objective',    [(t if t!='prose' else 'prose', c) for t,c in
                           [('prose',b) if isinstance(b,str) else b for b in obj_bullets]]),
         ('Process',      [('bullet',b) for b in proc_bullets]),
         ('Deliverables', [('bullet',b) for b in delv_bullets]),
-        ('Meetings &\nPresentations', [('bullet',b) for b in meet_bullets] if meet_bullets
-                          else [('bullet',b) for b in default_meetings]),
+        ('Meetings &\nPresentations', meetings_items),
     ]
 
     # Scale font size down if content is heavy — prevents overflow up to a point
@@ -650,78 +651,81 @@ def slide_stage_detail(prs, section_label, stage_title, body, accent, _continuat
     else:
         body_size = 10.5
 
-    # Overflow detection: even at the smallest font, some multi-space briefs
-    # produce more content than one slide's column height can hold. Rather
-    # than let PowerPoint silently clip text, split the overflow onto a
-    # continuation slide with the same layout. We size the split against the
-    # column that actually needs it (usually Deliverables) so short columns
-    # like Meetings aren't artificially truncated just because they share a
-    # uniform line cap with a much longer column.
     line_height_in = (body_size * 1.22) / 72  # standard ~1.2x line-height multiplier
     # Small safety margin: estimation uses Liberation Sans as a metric proxy
     # for the brand font (Filson Pro), and line-height multipliers vary
     # slightly by renderer. Real word-wrap simulation is now used for the
     # character-level estimate, so this only needs to cover renderer/font
     # variance, not estimation error.
-    max_lines = (col_h_in / line_height_in) * 0.92
+    max_lines_4col = (col_h_in / line_height_in) * 0.92
 
-    def _col_line_estimate(items):
-        return _estimate_col_lines(items, col_w_in, body_size)
+    def _line_estimate(items, width_in):
+        return _estimate_col_lines(items, width_in, body_size)
 
-    col_line_totals = [_col_line_estimate(items) for _, items in cols]
-    worst_col_idx = max(range(len(cols)), key=lambda i: col_line_totals[i])
-    needs_split = col_line_totals[worst_col_idx] > max_lines
+    # Decide overflow using Process and Deliverables only — these are the
+    # two columns that actually grow with brief size (multi-space briefs).
+    # Objective is a fixed-length summary and Meetings is a short, near-
+    # constant list; neither should drive the layout decision.
+    proc_lines_4col = _line_estimate(cols[1][1], col_w_in_full)
+    delv_lines_4col = _line_estimate(cols[2][1], col_w_in_full)
+    needs_split = (proc_lines_4col > max_lines_4col) or (delv_lines_4col > max_lines_4col)
 
     overflow_cols = {}
     if not needs_split:
+        # Normal case: all four columns side by side at full width.
         fitted_cols = cols
+        render_col_w = col_w_full
     else:
-        # Find how many items of the worst column fit, then carry the same
-        # *line-count fraction* across other columns so the split feels
-        # proportionate. Item count alone is the wrong axis — a column with
-        # 4 long bullets can occupy more vertical space than one with 8
-        # short bullets, so balancing on item count under-fills short-bullet
-        # columns and over-fills long-bullet ones.
-        worst_label, worst_items = cols[worst_col_idx]
-        kept_worst, overflow_worst = _split_items_for_overflow(worst_items, max_lines, col_w_in, body_size)
-        kept_worst_lines = _col_line_estimate(kept_worst)
-        keep_fraction = kept_worst_lines / max(1, col_line_totals[worst_col_idx])
+        # Process and/or Deliverables need more room than a 4-column layout
+        # gives them. Switch slide 1 to 3 columns — Objective | Process |
+        # Deliverables — and hold Meetings back entirely for the
+        # continuation slide, where it always appears last to signal the
+        # stage is complete, alongside whatever overflowed here.
+        render_col_w = (W - Inches(1.0)) / 3
+        render_col_w_in = render_col_w / 914400
+        max_lines_3col = (col_h_in / line_height_in) * 0.92
 
-        fitted_cols = []
-        for label, items in cols:
-            if label == worst_label:
-                fitted_cols.append((label, kept_worst))
-                if overflow_worst:
-                    overflow_cols[label] = overflow_worst
-                continue
-            if not items:
-                fitted_cols.append((label, items))
-                continue
-            this_lines = _col_line_estimate(items)
-            if this_lines <= max_lines:
-                # This column fits on slide 1 in full regardless of the
-                # worst column's split — no reason to truncate it.
-                fitted_cols.append((label, items))
-                continue
-            # This column also overflows on its own — split it at the same
-            # proportion of its own line budget as the worst column used.
-            target_lines = this_lines * keep_fraction
-            kept, overflow = _split_items_for_overflow(items, target_lines, col_w_in, body_size)
-            fitted_cols.append((label, kept))
-            if overflow:
-                overflow_cols[label] = overflow
+        obj_label, obj_items = cols[0]
+        proc_label, proc_items = cols[1]
+        delv_label, delv_items = cols[2]
+
+        proc_lines = _line_estimate(proc_items, render_col_w_in)
+        delv_lines = _line_estimate(delv_items, render_col_w_in)
+
+        if proc_lines <= max_lines_3col:
+            kept_proc, overflow_proc = proc_items, []
+        else:
+            kept_proc, overflow_proc = _split_items_for_overflow(proc_items, max_lines_3col, render_col_w_in, body_size)
+
+        if delv_lines <= max_lines_3col:
+            kept_delv, overflow_delv = delv_items, []
+        else:
+            kept_delv, overflow_delv = _split_items_for_overflow(delv_items, max_lines_3col, render_col_w_in, body_size)
+
+        fitted_cols = [(obj_label, obj_items), (proc_label, kept_proc), (delv_label, kept_delv)]
+        if overflow_proc:
+            overflow_cols[proc_label] = overflow_proc
+        if overflow_delv:
+            overflow_cols[delv_label] = overflow_delv
+        # Meetings always goes to the continuation slide in this case, even
+        # though it would fit here — it should read as the closing column.
+        overflow_cols[cols[3][0]] = cols[3][1]
 
     for i, (col_label, items) in enumerate(fitted_cols):
-        x = Inches(0.5) + i * col_w
+        x = Inches(0.5) + i * render_col_w
         # Column heading
-        tb_h = slide.shapes.add_textbox(x, col_start - Inches(0.06), col_w - Inches(0.1), Inches(0.3))
-        r_h = tb_h.text_frame.paragraphs[0].add_run()
+        tb_h = slide.shapes.add_textbox(x, col_start - Inches(0.06), render_col_w - Inches(0.1), Inches(0.34))
+        tf_h = tb_h.text_frame
+        tf_h.word_wrap = True
+        tf_h.auto_size = MSO_AUTO_SIZE.NONE
+        tf_h.paragraphs[0].alignment = PP_ALIGN.LEFT
+        r_h = tf_h.paragraphs[0].add_run()
         r_h.text = col_label; r_h.font.name = F_HEAD; r_h.font.size = Pt(11)
         r_h.font.bold = True; r_h.font.color.rgb = accent
         # Divider
-        if i < 3:
-            _box(slide, x + col_w - Inches(0.06), col_start, Inches(0.01), col_h, RULE)
-        _textbox(slide, items, x, col_start + Inches(0.28), col_w - Inches(0.1), col_h - Inches(0.28), size=body_size)
+        if i < len(fitted_cols) - 1:
+            _box(slide, x + render_col_w - Inches(0.06), col_start, Inches(0.01), col_h, RULE)
+        _textbox(slide, items, x, col_start + Inches(0.28), render_col_w - Inches(0.1), col_h - Inches(0.28), size=body_size)
 
     _footer(slide)
 
@@ -742,17 +746,22 @@ def slide_stage_detail(prs, section_label, stage_title, body, accent, _continuat
         _rule(cont_slide, Inches(0.5), Inches(1.4), W-Inches(1.0))
         cont_col_start = Inches(1.6)
         cont_col_h = H - cont_col_start - Inches(0.35)
-        for i, (col_label, items) in enumerate(cont_cols_items):
-            if not items:
-                continue
-            x = Inches(0.5) + i * col_w
-            tb_h = cont_slide.shapes.add_textbox(x, cont_col_start - Inches(0.06), col_w - Inches(0.1), Inches(0.3))
-            r_h = tb_h.text_frame.paragraphs[0].add_run()
+        populated = [(label, items) for label, items in cont_cols_items if items]
+        n_pop = len(populated) or 1
+        cont_col_w = (W - Inches(1.0)) / n_pop
+        for i, (col_label, items) in enumerate(populated):
+            x = Inches(0.5) + i * cont_col_w
+            tb_h = cont_slide.shapes.add_textbox(x, cont_col_start - Inches(0.06), cont_col_w - Inches(0.1), Inches(0.34))
+            tf_h = tb_h.text_frame
+            tf_h.word_wrap = True
+            tf_h.auto_size = MSO_AUTO_SIZE.NONE
+            tf_h.paragraphs[0].alignment = PP_ALIGN.LEFT
+            r_h = tf_h.paragraphs[0].add_run()
             r_h.text = col_label; r_h.font.name = F_HEAD; r_h.font.size = Pt(11)
             r_h.font.bold = True; r_h.font.color.rgb = accent
-            if i < 3:
-                _box(cont_slide, x + col_w - Inches(0.06), cont_col_start, Inches(0.01), cont_col_h, RULE)
-            _textbox(cont_slide, items, x, cont_col_start + Inches(0.28), col_w - Inches(0.1),
+            if i < n_pop - 1:
+                _box(cont_slide, x + cont_col_w - Inches(0.06), cont_col_start, Inches(0.01), cont_col_h, RULE)
+            _textbox(cont_slide, items, x, cont_col_start + Inches(0.28), cont_col_w - Inches(0.1),
                      cont_col_h - Inches(0.28), size=body_size)
         _footer(cont_slide)
 

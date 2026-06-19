@@ -789,7 +789,7 @@ Flag anything that needs confirming with: [CONFIRM WITH CLIENT: what needs clari
     ('stage3',  'Stage 3 — Design development',
      STAGE_PROMPT.format(stage_name='Stage 3 — Design development (RIBA Stage 2, 2 weeks). Include concept freeze milestone in Deliverables', ctx='{ctx}')),
     ('stage456','Stage 4 onwards',
-     STAGE_PROMPT.format(stage_name='The final stage(s) of the project covering technical production, coordination and handover. For RIBA-staged projects call this "Stages 4, 5 and 6" and use sub-headings Stage 4 / Stage 5 / Stage 6. For phase-based or arena projects call this "Phase 4 — Production and delivery" and describe it as a single phase. Match the naming convention used in the earlier stage sections.', ctx='{ctx}')),
+     STAGE_PROMPT.format(stage_name='The final stage(s) of the project covering technical production, coordination and handover. For RIBA-staged projects call this "Stages 4, 5 and 6" and use sub-headings Stage 4 / Stage 5 / Stage 6. For phase-based or arena projects call this "Phase 4 — Production and delivery" and describe it as a single phase. Match the naming convention used in the earlier stage sections. IMPORTANT: this section covers multiple sub-stages in one response. Every sub-stage MUST have its own populated Deliverables list — do not let Objective and Process content crowd out Deliverables. If space is tight, keep Process bullets shorter rather than dropping Deliverables content.', ctx='{ctx}')),
     ('fees',    'Fees and timings',
      'Write the fees section. List each stage with [FEE: TBC] for all figures. Note timings per stage. Fees are exclusive of VAT, 3rd party costs, general expenses and travel. Subject to contract.\n\n{ctx}'),
     ('nextsteps','Next steps',
@@ -1082,6 +1082,13 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
                 ctx=ctx
             )
 
+            # Stage 4-6 (or Phase 4 onward) covers multiple sub-stages in one
+            # response — Objective/Process/Deliverables/Meetings each repeated
+            # per sub-stage. The standard 800-token budget is tuned for a
+            # single-stage response and was truncating Deliverables for this
+            # section specifically. Give it more room.
+            section_max_tokens = 1900 if sid == 'stage456' else 800
+
             for attempt in range(3):
                 try:
                     if attempt > 0:
@@ -1091,7 +1098,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
 
                     resp3 = client.messages.create(
                         model='claude-sonnet-4-6',
-                        max_tokens=800,
+                        max_tokens=section_max_tokens,
                         system=SYSTEM_PROMPT,
                         messages=[{'role': 'user', 'content': prompt}]
                     )

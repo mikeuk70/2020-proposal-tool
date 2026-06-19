@@ -48,6 +48,84 @@ def _accent(name):
         if k in cl: return RGBColor(*v)
     return DEFAULT_ACCENT
 
+# Collects every [CONFIRM WITH CLIENT: ...] note found across the whole
+# deck build, in the order encountered, tagged with which section/space it
+# came from. Read by build_pptx_clean() at the end to build a dedicated
+# internal action page, rather than leaving these inline in client-facing
+# slide text.
+_CONFIRM_TAG_RE = re.compile(r'\[CONFIRM WITH CLIENT:\s*([^\]]+)\]', re.IGNORECASE)
+_confirm_notes_registry = []
+
+def _reset_confirm_notes():
+    _confirm_notes_registry.clear()
+
+def _extract_confirm_notes(txt, context_label=''):
+    """Find every [CONFIRM WITH CLIENT: ...] note in txt, record it against
+    context_label (e.g. the slide/section it came from) for the action page,
+    and return txt with those tags removed so they never reach a client-
+    facing slide."""
+    if not txt:
+        return txt
+    for m in _CONFIRM_TAG_RE.finditer(txt):
+        note = m.group(1).strip()
+        if note:
+            _confirm_notes_registry.append((context_label, note))
+    return _CONFIRM_TAG_RE.sub('', txt)
+
+
+def slide_confirm_actions(prs, notes, accent):
+    """Internal-use action page collecting every [CONFIRM WITH CLIENT: ...]
+    note found while building the deck, grouped by the section/space it came
+    from. These never appear inline in client-facing slides — see
+    _extract_confirm_notes — they're collected here instead so the account
+    team has a single checklist of assumptions to verify before sending."""
+    if not notes:
+        return
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _bg(slide, WHITE); _logo(slide)
+    _label(slide, 'Internal use only — not for client', RGBColor(0xA3, 0x2D, 0x2D))
+    _rule(slide, Inches(0.5), Inches(0.92), W-Inches(1.0))
+    _heading(slide, 'Points to confirm before sending', y=Inches(0.96), size=24)
+    tb_sub = slide.shapes.add_textbox(Inches(0.5), Inches(1.68), W-Inches(1.0), Inches(0.4))
+    tf_sub = tb_sub.text_frame; tf_sub.word_wrap = True
+    r_sub = tf_sub.paragraphs[0].add_run()
+    r_sub.text = ('Assumptions and gaps flagged while drafting. Resolve these with the client '
+                  'or remove this page before the proposal goes out.')
+    r_sub.font.name = F_BODY; r_sub.font.size = Pt(11); r_sub.font.italic = True; r_sub.font.color.rgb = GREY
+    _rule(slide, Inches(0.5), Inches(2.16), W-Inches(1.0))
+
+    # Group notes by their source section, in first-seen order
+    grouped = []
+    seen_labels = []
+    by_label = {}
+    for label, note in notes:
+        if label not in by_label:
+            by_label[label] = []
+            seen_labels.append(label)
+        by_label[label].append(note)
+    for label in seen_labels:
+        grouped.append((label, by_label[label]))
+
+    col_w = (W - Inches(1.0)) / 2
+    col_h = H - Inches(2.4) - Inches(0.35)
+    half = -(-len(grouped) // 2)  # ceil division — split groups across 2 columns
+    columns = [grouped[:half], grouped[half:]]
+
+    total_notes = sum(len(notes) for _, notes in grouped)
+    body_size = 9.5 if total_notes > 14 else 10.5
+
+    for col_idx, col_groups in enumerate(columns):
+        x = Inches(0.5) + col_idx * col_w
+        items = []
+        for label, group_notes in col_groups:
+            items.append(('bold', label))
+            for note in group_notes:
+                items.append(('bullet', note))
+        _textbox(slide, items, x, Inches(2.4), col_w - Inches(0.2), col_h, size=body_size)
+
+    _footer(slide)
+
+
 def _clean(t):
     if not t: return ''
     # Strip markdown bold/italic
@@ -913,7 +991,9 @@ def find_section(sections, *keys):
         for sec in sections:
             h = sec.get('heading','').lower()
             if kl in h or h in kl:
-                return _clean(sec.get('body',''))
+                cleaned = _clean(sec.get('body',''))
+                label = sec.get('heading', key)
+                return _extract_confirm_notes(cleaned, context_label=label)
     return ''
 
 # Stage definitions by brief type
@@ -983,6 +1063,7 @@ def get_stage_defs(brief_type, riba_stages, is_riba_flag='yes'):
     return STAGES_RIBA, True
 
 def build_pptx_clean(sections, meta, output_path):
+    _reset_confirm_notes()
     client  = meta.get('client','')
     venue   = meta.get('venue','Project')
     contact = meta.get('contact','')
@@ -1128,6 +1209,12 @@ def build_pptx_clean(sections, meta, output_path):
     # Next steps
     next_txt = find_section(sections,'next steps')
     slide_next_steps(prs, next_txt, accent)
+
+    # Internal action page — every [CONFIRM WITH CLIENT: ...] note collected
+    # while building the deck, grouped by section. Added last so it never
+    # interrupts the client-facing flow. Omitted entirely if no notes were
+    # found (slide_confirm_actions no-ops on an empty list).
+    slide_confirm_actions(prs, list(_confirm_notes_registry), accent)
 
     prs.save(output_path)
     return output_path

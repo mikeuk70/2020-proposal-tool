@@ -84,7 +84,7 @@ def build_docx(sections, meta):
 
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 20 * 1024 * 1024  # 20MB max upload
+app.config['MAX_CONTENT_LENGTH'] = 60 * 1024 * 1024  # 60MB max upload — main brief + up to 5 supporting PDFs
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
@@ -911,17 +911,34 @@ def strip_html(txt):
     clean = clean.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&nbsp;', ' ')
     return ' '.join(clean.split())
 
-def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
+def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supporting_docs_b64=None):
     """Background thread: extract → research → generate → build PPTX."""
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    supporting_docs_b64 = supporting_docs_b64 or []
 
     def progress(msg, pct=None):
         append_progress(job_id, msg, pct)
 
     try:
         # ── STEP 1: EXTRACT ─────────────────────────────────────────────────
-        progress('Reading the brief...', 5)
+        if supporting_docs_b64:
+            names = ', '.join(d['name'] for d in supporting_docs_b64)
+            progress(f'Reading the brief and {len(supporting_docs_b64)} supporting document(s): {names}...', 5)
+        else:
+            progress('Reading the brief...', 5)
+        if supporting_docs_b64:
+            doc_intro = (
+                f'You are looking at a primary client brief, plus {len(supporting_docs_b64)} supporting '
+                'context document(s) (RFP appendices, brand guidelines, prior reports, briefing decks, etc.). '
+                'The FIRST document is the primary brief and takes priority — if anything in a supporting '
+                'document conflicts with the primary brief, the primary brief wins. Use the supporting '
+                'documents to fill in detail, context and constraints the primary brief does not state, '
+                'but do not let them override what the primary brief explicitly says.\n\n'
+            )
+        else:
+            doc_intro = ''
         extract_prompt = (
+            doc_intro +
             'Read this client brief, ITT or scope document carefully. Extract ALL available information. Return ONLY valid JSON with NO markdown or explanation.\n'
             'CRITICAL: every string value must be valid JSON. Escape all double quotes as \\" and avoid '
             'using straight or curly apostrophes inside values where possible — rephrase rather than quote '
@@ -960,10 +977,18 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
         if pdf_b64:
             msg_content = [
                 {'type': 'document', 'source': {'type': 'base64', 'media_type': 'application/pdf', 'data': pdf_b64}},
-                {'type': 'text', 'text': extract_prompt},
             ]
+            for doc in supporting_docs_b64:
+                msg_content.append({'type': 'document', 'source': {'type': 'base64', 'media_type': 'application/pdf', 'data': doc['b64']}})
+            msg_content.append({'type': 'text', 'text': extract_prompt})
         else:
-            msg_content = extract_prompt + '\n\nBrief:\n' + (brief_text or '')[:4000]
+            # Text-pasted brief — supporting PDFs still get attached as
+            # document blocks alongside the pasted text.
+            msg_content = [{'type': 'text', 'text': extract_prompt + '\n\nBrief:\n' + (brief_text or '')[:4000]}]
+            for doc in supporting_docs_b64:
+                msg_content.append({'type': 'document', 'source': {'type': 'base64', 'media_type': 'application/pdf', 'data': doc['b64']}})
+            if not supporting_docs_b64:
+                msg_content = msg_content[0]['text']  # keep simple string form when no docs attached
 
         resp = client.messages.create(
             model='claude-sonnet-4-6',
@@ -1339,6 +1364,24 @@ textarea:focus{border-color:var(--nv)}
         </div>
       </div>
 
+      <div style="margin-top:.75rem;padding:.75rem;background:var(--bg);border:1px solid var(--bd);border-radius:var(--r)">
+        <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem">
+          <label class="field-label" style="margin:0">Supporting documents?</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--tx2);cursor:pointer">
+            <input type="checkbox" id="supporting-docs-toggle" onchange="toggleSupportingDocs()">
+            Yes — add extra context documents
+          </label>
+        </div>
+        <div id="supporting-docs-panel" style="display:none;margin-top:.5rem">
+          <label class="field-label">Upload supporting PDFs (briefing decks, RFP appendices, prior reports, brand guidelines, etc.)</label>
+          <input type="file" id="supporting-docs-input" accept=".pdf" multiple>
+          <p style="font-size:11px;color:var(--tx2);margin-top:.4rem">
+            Up to 5 files, PDF only. These are read alongside the main brief — the main brief still takes priority if anything conflicts.
+          </p>
+          <div id="supporting-docs-list" style="margin-top:.4rem;font-size:12px;color:var(--tx2)"></div>
+        </div>
+      </div>
+
       <div id="submit-error" class="error-box hidden"></div>
 
       <div style="margin-top:1rem">
@@ -1528,6 +1571,29 @@ function togglePriorWork() {
   document.getElementById('prior-work-panel').style.display = chk.checked ? 'block' : 'none';
 }
 
+function toggleSupportingDocs() {
+  var chk = document.getElementById('supporting-docs-toggle');
+  document.getElementById('supporting-docs-panel').style.display = chk.checked ? 'block' : 'none';
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  var input = document.getElementById('supporting-docs-input');
+  if (input) {
+    input.addEventListener('change', function() {
+      var list = document.getElementById('supporting-docs-list');
+      var files = Array.from(input.files || []);
+      if (files.length > 5) {
+        list.innerHTML = '<span style="color:#A32D2D">Please select up to 5 files — only the first 5 will be used.</span>';
+        files = files.slice(0, 5);
+      } else if (files.length) {
+        list.innerHTML = files.map(function(f) { return '\u2713 ' + f.name; }).join('<br>');
+      } else {
+        list.innerHTML = '';
+      }
+    });
+  }
+});
+
 async function submitBrief() {
   var errEl = document.getElementById('submit-error');
   errEl.classList.add('hidden');
@@ -1548,6 +1614,15 @@ async function submitBrief() {
   if (priorToggle && priorToggle.checked) {
     var priorTxt = document.getElementById('prior-work-text').value.trim();
     if (priorTxt) fd.append('prior_work_context', priorTxt);
+  }
+
+  // Add supporting documents if provided — up to 5 PDFs, read alongside
+  // the main brief during extraction (main brief still takes priority).
+  var docsToggle = document.getElementById('supporting-docs-toggle');
+  if (docsToggle && docsToggle.checked) {
+    var docsInput = document.getElementById('supporting-docs-input');
+    var docFiles = Array.from((docsInput && docsInput.files) || []).slice(0, 5);
+    docFiles.forEach(function(file) { fd.append('supporting_docs', file); });
   }
 
   document.getElementById('submit-btn').disabled = true;
@@ -1890,7 +1965,28 @@ def submit():
     else:
         return jsonify({'error': 'Please upload a PDF or paste the brief text.'}), 400
 
-    t = threading.Thread(target=run_pipeline, args=(job_id, pdf_b64, brief_text, prior_work), daemon=True)
+    # Supporting context documents — up to 5 extra PDFs read alongside the
+    # main brief during extraction. The main brief still takes priority if
+    # anything conflicts; these just add context the model wouldn't
+    # otherwise see (RFP appendices, brand guidelines, prior reports, etc.)
+    supporting_docs_b64 = []
+    supporting_files = request.files.getlist('supporting_docs')[:5]
+    for sf in supporting_files:
+        if not sf or not sf.filename:
+            continue
+        if not sf.filename.lower().endswith('.pdf'):
+            continue
+        data = sf.read()
+        if len(data) > 8 * 1024 * 1024:  # 8MB per supporting file
+            continue
+        supporting_docs_b64.append({
+            'name': sf.filename,
+            'b64': base64.b64encode(data).decode('ascii'),
+        })
+
+    t = threading.Thread(target=run_pipeline,
+                          args=(job_id, pdf_b64, brief_text, prior_work, supporting_docs_b64),
+                          daemon=True)
     t.start()
 
     return jsonify({'job_id': job_id})

@@ -699,13 +699,15 @@ Objective:
 [1-2 sentences on what this stage achieves for THIS project — reference the specific venue, spaces or tiers]
 
 Process:
-[4-6 bullet points — how we work through this stage. Reference the specific spaces, tiers and design team context where relevant. Include sub-stages if the RIBA stages have sub-divisions e.g. 2.1, 2.2, 2.3]
+[4-6 bullet points — how we work through this stage. Reference the specific spaces, tiers and design team context where relevant. If the project has multiple spaces or sub-stages (e.g. 3.1, 3.2, 3.3), summarise the sequence and grouping logic here in a few bullets — do not give each sub-stage its own bullet if that means Deliverables ends up empty.]
 
 Deliverables:
-[6-10 bullet points — specific outputs. If there are named spaces, reference them. If there is a per-tier delivery model, reflect it. Include the number of CGI renders if concept stage]
+[6-10 bullet points — specific outputs, covering ALL spaces and sub-stages named in this stage, not just the ones mentioned in Process. If there are named spaces, reference them. If there is a per-tier delivery model, reflect it. Include the number of CGI renders if concept stage]
 
 Meetings & Presentations:
 [3-5 bullet points — specific meetings with the design team, architect and client. Reference Teams or in-person based on what the brief says]
+
+CRITICAL — sub-stages and multi-space projects: when a stage covers multiple spaces or numbered sub-stages (e.g. Stage 3.1 through 3.6 across different lounges), do NOT spread the sub-stage walkthrough across Objective, Process and Deliverables as if each column holds a different slice of the sequence. Each of Objective, Process, Deliverables and Meetings must independently cover the FULL stage, every space and every sub-stage, just from that column's own angle (what it achieves / how we do it / what we produce / who we meet). A reader looking at only the Deliverables column should see outputs for every single space in this stage, not just some of them.
 
 Quality requirements — these are mandatory:
 
@@ -1085,12 +1087,21 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
                 ctx=ctx
             )
 
-            # Stage 4-6 (or Phase 4 onward) covers multiple sub-stages in one
-            # response — Objective/Process/Deliverables/Meetings each repeated
-            # per sub-stage. The standard 800-token budget is tuned for a
-            # single-stage response and was truncating Deliverables for this
-            # section specifically. Give it more room.
-            section_max_tokens = 1900 if sid == 'stage456' else 800
+            # Multi-space briefs (e.g. 8+ named lounges/boxes at a stadium)
+            # push every stage section — not just stage456 — toward covering
+            # many sub-stages in one response. An 800-token budget tuned for a
+            # single-space brief truncates Deliverables (or whichever section
+            # the model writes last) once enough spaces are in scope. Scale
+            # up by space count for any stage section, with stage456 getting
+            # an extra margin since it covers three RIBA stages at once.
+            num_spaces = len(raw_spaces) if raw_spaces else 0
+            is_stage_section = sid in ('stage1', 'stage2', 'stage3', 'stage456')
+            if is_stage_section and num_spaces >= 5:
+                section_max_tokens = 2400 if sid == 'stage456' else 1700
+            elif sid == 'stage456':
+                section_max_tokens = 1900
+            else:
+                section_max_tokens = 800
 
             for attempt in range(3):
                 try:

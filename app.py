@@ -25,6 +25,24 @@ def build_docx(sections, meta):
         s.font.name = 'Arial'; s.font.size = Pt(sz); s.font.bold = True
         s.font.color.rgb = RGBColor(0x11, 0x14, 0x18)
 
+    # Collects every [CONFIRM WITH CLIENT: ...] note found while building
+    # this doc, grouped by section heading, so they can be moved to a
+    # dedicated internal action page at the end instead of appearing inline
+    # in client-facing text. Mirrors the same behaviour in pptx_builder.py —
+    # this export path needs its own copy since it has its own text-cleaning
+    # function rather than sharing pptx_builder's.
+    confirm_notes = []
+    _confirm_re = re.compile(r'\[CONFIRM WITH CLIENT:\s*([^\]]+)\]', re.IGNORECASE)
+
+    def _strip_confirm_notes(text, label):
+        if not text:
+            return text
+        for m in _confirm_re.finditer(text):
+            note = m.group(1).strip()
+            if note:
+                confirm_notes.append((label, note))
+        return _confirm_re.sub('', text)
+
     def _c(t):
         if not t: return ''
         t = re.sub(r'\*\*([^*]+)\*\*', r'\1', t)
@@ -72,9 +90,38 @@ def build_docx(sections, meta):
         body = sec.get('body','')
         if not body.strip(): continue
         heading = sec.get('heading', sec.get('id','').replace('_',' ').title())
+        body = _strip_confirm_notes(body, heading)
         doc.add_heading(heading, level=1)
         add_body(body)
         doc.add_paragraph()
+
+    if confirm_notes:
+        doc.add_page_break()
+        h = doc.add_heading('Internal use only — points to confirm before sending', level=1)
+        for run in h.runs:
+            run.font.color.rgb = RGBColor(0xA3, 0x2D, 0x2D)
+        note_p = doc.add_paragraph()
+        note_r = note_p.add_run(
+            'Assumptions and gaps flagged while drafting. Resolve these with the client '
+            'or remove this page before the proposal goes out.'
+        )
+        note_r.font.italic = True
+        note_r.font.size = Pt(10)
+        note_r.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+
+        seen_labels = []
+        by_label = {}
+        for label, note in confirm_notes:
+            if label not in by_label:
+                by_label[label] = []
+                seen_labels.append(label)
+            by_label[label].append(note)
+        for label in seen_labels:
+            doc.add_heading(label, level=2)
+            for note in by_label[label]:
+                p = doc.add_paragraph(style='List Bullet')
+                p.paragraph_format.left_indent = Cm(0.5)
+                run = p.add_run(note); run.font.name = 'Arial'; run.font.size = Pt(11)
 
     tmp = tempfile.mkdtemp(prefix='2020_docx_')
     slug = re.sub(r'[^a-zA-Z0-9]+', '_', meta.get('venue','Proposal'))
@@ -1160,7 +1207,13 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
         ctx = build_context(meta, spaces_text)
         sections = []
         total = len(SECTIONS)
-        GAP = 7  # seconds between API calls
+        # Wider gap when supporting docs were processed earlier in this same
+        # job — those calls already consumed part of the per-minute token
+        # budget before this loop even starts, so the default 7s gap isn't
+        # enough slack on lower usage tiers. This doesn't remove the
+        # underlying ceiling (see console.anthropic.com/settings/limits) but
+        # reduces how often a complex, multi-document brief trips it.
+        GAP = 14 if supporting_docs_b64 else 7
 
         for i, (sid, label, prompt_tpl) in enumerate(SECTIONS):
             pct = 20 + int((i / total) * 65)
@@ -1188,10 +1241,10 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
             else:
                 section_max_tokens = 800
 
-            for attempt in range(3):
+            for attempt in range(4):
                 try:
                     if attempt > 0:
-                        wait = 35 if attempt == 1 else 55
+                        wait = [0, 35, 55, 80][attempt]
                         progress(f'Rate limit — retrying {label} in {wait}s...', pct)
                         time.sleep(wait)
 
@@ -1206,7 +1259,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
                     append_section(job_id, sec)
                     break
                 except anthropic.RateLimitError:
-                    if attempt == 2:
+                    if attempt == 3:
                         sec = {'id': sid, 'heading': label, 'body': '[Could not generate — add manually]'}
                         sections.append(sec)
                         append_section(job_id, sec)
@@ -2122,7 +2175,7 @@ def rebuild():
 
 @app.route('/download-docx/<job_id>')
 def download_docx(job_id):
-    job = get_job(job_id)
+    job = load_job(job_id)
     if not job:
         return 'Job not found', 404
     sections = job.get('sections', [])

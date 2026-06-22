@@ -84,7 +84,7 @@ def build_docx(sections, meta):
 
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 60 * 1024 * 1024  # 60MB max upload — main brief + up to 5 supporting PDFs
+app.config['MAX_CONTENT_LENGTH'] = 40 * 1024 * 1024  # 40MB max upload — main brief + up to 3 supporting PDFs. Note: this caps request SIZE in bytes, not tokens — the rate limit that actually bites on complex briefs is Anthropic's per-minute token limit, not file size.
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
@@ -990,11 +990,26 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
             if not supporting_docs_b64:
                 msg_content = msg_content[0]['text']  # keep simple string form when no docs attached
 
-        resp = client.messages.create(
-            model='claude-sonnet-4-6',
-            max_tokens=1400,
-            messages=[{'role': 'user', 'content': msg_content}]
-        )
+        resp = None
+        for attempt in range(4):
+            try:
+                if attempt > 0:
+                    wait = [0, 25, 45, 70][attempt]
+                    progress(f'Rate limit reached — retrying extraction in {wait}s... '
+                             f'(this brief has {1 + len(supporting_docs_b64)} document(s) attached)', 5)
+                    time.sleep(wait)
+                resp = client.messages.create(
+                    model='claude-sonnet-4-6',
+                    max_tokens=1400,
+                    messages=[{'role': 'user', 'content': msg_content}]
+                )
+                break
+            except anthropic.RateLimitError:
+                if attempt == 3:
+                    raise ValueError(
+                        'Rate limit reached reading the brief and supporting documents. '
+                        'Try again in a minute, or resubmit with fewer supporting documents attached.'
+                    )
         raw = resp.content[0].text.replace('```json', '').replace('```', '').strip()
         m = re.search(r'\{[\s\S]*\}', raw)
         if not m:
@@ -1376,7 +1391,7 @@ textarea:focus{border-color:var(--nv)}
           <label class="field-label">Upload supporting PDFs (briefing decks, RFP appendices, prior reports, brand guidelines, etc.)</label>
           <input type="file" id="supporting-docs-input" accept=".pdf" multiple>
           <p style="font-size:11px;color:var(--tx2);margin-top:.4rem">
-            Up to 5 files, PDF only. These are read alongside the main brief — the main brief still takes priority if anything conflicts.
+            Up to 3 files, PDF only. These are read alongside the main brief in a single pass, so keep them focused — every extra page adds to one request and can hit a rate limit on complex briefs. The main brief still takes priority if anything conflicts.
           </p>
           <div id="supporting-docs-list" style="margin-top:.4rem;font-size:12px;color:var(--tx2)"></div>
         </div>
@@ -1582,9 +1597,9 @@ document.addEventListener('DOMContentLoaded', function() {
     input.addEventListener('change', function() {
       var list = document.getElementById('supporting-docs-list');
       var files = Array.from(input.files || []);
-      if (files.length > 5) {
-        list.innerHTML = '<span style="color:#A32D2D">Please select up to 5 files — only the first 5 will be used.</span>';
-        files = files.slice(0, 5);
+      if (files.length > 3) {
+        list.innerHTML = '<span style="color:#A32D2D">Please select up to 3 files — only the first 3 will be used.</span>';
+        files = files.slice(0, 3);
       } else if (files.length) {
         list.innerHTML = files.map(function(f) { return '\u2713 ' + f.name; }).join('<br>');
       } else {
@@ -1621,7 +1636,7 @@ async function submitBrief() {
   var docsToggle = document.getElementById('supporting-docs-toggle');
   if (docsToggle && docsToggle.checked) {
     var docsInput = document.getElementById('supporting-docs-input');
-    var docFiles = Array.from((docsInput && docsInput.files) || []).slice(0, 5);
+    var docFiles = Array.from((docsInput && docsInput.files) || []).slice(0, 3);
     docFiles.forEach(function(file) { fd.append('supporting_docs', file); });
   }
 
@@ -1970,7 +1985,7 @@ def submit():
     # anything conflicts; these just add context the model wouldn't
     # otherwise see (RFP appendices, brand guidelines, prior reports, etc.)
     supporting_docs_b64 = []
-    supporting_files = request.files.getlist('supporting_docs')[:5]
+    supporting_files = request.files.getlist('supporting_docs')[:3]
     for sf in supporting_files:
         if not sf or not sf.filename:
             continue

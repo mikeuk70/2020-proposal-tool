@@ -6,6 +6,7 @@ Hosted Flask app for LawLiss / 20.20
 import os, json, uuid, threading, queue, time, base64, re, copy, zipfile, tempfile, shutil
 import anthropic
 from flask import Flask, request, jsonify, send_file, Response
+from werkzeug.exceptions import RequestEntityTooLarge
 from pptx_builder import build_pptx_clean
 def build_docx(sections, meta):
     """Build a clean Word document from generated sections for team review and sharing."""
@@ -1957,47 +1958,59 @@ def submit():
         return jsonify({'error': 'API key not configured on server.'}), 500
 
     job_id = str(uuid.uuid4())[:8]
-    save_job(job_id, {
-        'status': 'running',
-        'progress': [],
-        'sections': [],
-        'meta': {},
-        'intel': {},
-        'extracted': {},
-        'pptx_path': None,
-        'error': None,
-    })
 
-    pdf_b64 = None
-    brief_text = None
-    prior_work = request.form.get('prior_work_context', '')
-
-    if 'brief_pdf' in request.files and request.files['brief_pdf'].filename:
-        f = request.files['brief_pdf']
-        pdf_b64 = base64.b64encode(f.read()).decode('ascii')
-    elif request.form.get('brief_text'):
-        brief_text = request.form.get('brief_text')
-    else:
-        return jsonify({'error': 'Please upload a PDF or paste the brief text.'}), 400
-
-    # Supporting context documents — up to 5 extra PDFs read alongside the
-    # main brief during extraction. The main brief still takes priority if
-    # anything conflicts; these just add context the model wouldn't
-    # otherwise see (RFP appendices, brand guidelines, prior reports, etc.)
-    supporting_docs_b64 = []
-    supporting_files = request.files.getlist('supporting_docs')[:3]
-    for sf in supporting_files:
-        if not sf or not sf.filename:
-            continue
-        if not sf.filename.lower().endswith('.pdf'):
-            continue
-        data = sf.read()
-        if len(data) > 8 * 1024 * 1024:  # 8MB per supporting file
-            continue
-        supporting_docs_b64.append({
-            'name': sf.filename,
-            'b64': base64.b64encode(data).decode('ascii'),
+    try:
+        save_job(job_id, {
+            'status': 'running',
+            'progress': [],
+            'sections': [],
+            'meta': {},
+            'intel': {},
+            'extracted': {},
+            'pptx_path': None,
+            'error': None,
         })
+
+        pdf_b64 = None
+        brief_text = None
+        prior_work = request.form.get('prior_work_context', '')
+
+        if 'brief_pdf' in request.files and request.files['brief_pdf'].filename:
+            f = request.files['brief_pdf']
+            pdf_b64 = base64.b64encode(f.read()).decode('ascii')
+        elif request.form.get('brief_text'):
+            brief_text = request.form.get('brief_text')
+        else:
+            return jsonify({'error': 'Please upload a PDF or paste the brief text.'}), 400
+
+        # Supporting context documents — up to 3 extra PDFs read alongside the
+        # main brief during extraction. The main brief still takes priority if
+        # anything conflicts; these just add context the model wouldn't
+        # otherwise see (RFP appendices, brand guidelines, prior reports, etc.)
+        supporting_docs_b64 = []
+        supporting_files = request.files.getlist('supporting_docs')[:3]
+        for sf in supporting_files:
+            if not sf or not sf.filename:
+                continue
+            if not sf.filename.lower().endswith('.pdf'):
+                continue
+            data = sf.read()
+            if len(data) > 8 * 1024 * 1024:  # 8MB per supporting file
+                continue
+            supporting_docs_b64.append({
+                'name': sf.filename,
+                'b64': base64.b64encode(data).decode('ascii'),
+            })
+
+    except RequestEntityTooLarge:
+        return jsonify({'error': (
+            'The brief and supporting documents together are too large for one upload. '
+            'Try fewer supporting documents, or smaller files, and submit again.'
+        )}), 413
+    except Exception as e:
+        import traceback
+        print('SUBMIT ERROR:', traceback.format_exc())
+        return jsonify({'error': f'Could not process the upload: {str(e)[:200]}'}), 500
 
     t = threading.Thread(target=run_pipeline,
                           args=(job_id, pdf_b64, brief_text, prior_work, supporting_docs_b64),

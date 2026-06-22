@@ -850,6 +850,8 @@ def build_context(meta, spaces_text=''):
         ctx += f"\nCLIENT DISLIKES/AVOIDED APPROACHES:\n{meta['client_dislikes']}\n"
     if meta.get('design_approach'):
         ctx += f"\nSPECIFIC DESIGN APPROACH REQUESTED:\n{meta['design_approach']}\n"
+    if meta.get('supporting_context'):
+        ctx += f"\nADDITIONAL CONTEXT FROM SUPPORTING DOCUMENTS (the primary brief above always takes priority if anything conflicts):\n{meta['supporting_context']}\n"
 
     return ctx.strip()
 
@@ -921,25 +923,18 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
         append_progress(job_id, msg, pct)
 
     try:
-        # ── STEP 1: EXTRACT ─────────────────────────────────────────────────
-        if supporting_docs_b64:
-            names = ', '.join(d['name'] for d in supporting_docs_b64)
-            progress(f'Reading the brief and {len(supporting_docs_b64)} supporting document(s): {names}...', 5)
-        else:
-            progress('Reading the brief...', 5)
-        if supporting_docs_b64:
-            doc_intro = (
-                f'You are looking at a primary client brief, plus {len(supporting_docs_b64)} supporting '
-                'context document(s) (RFP appendices, brand guidelines, prior reports, briefing decks, etc.). '
-                'The FIRST document is the primary brief and takes priority — if anything in a supporting '
-                'document conflicts with the primary brief, the primary brief wins. Use the supporting '
-                'documents to fill in detail, context and constraints the primary brief does not state, '
-                'but do not let them override what the primary brief explicitly says.\n\n'
-            )
-        else:
-            doc_intro = ''
+        # ── STEP 1: EXTRACT MAIN BRIEF ───────────────────────────────────────
+        # Supporting docs are deliberately NOT stacked into this call. Each
+        # extra PDF in the same request multiplies the input tokens for that
+        # single call, and on lower usage tiers (30k input tokens/minute is
+        # the default tier) a brief plus 2-3 supporting PDFs can blow past
+        # the limit in one shot, where retrying just fails again at the same
+        # size. Instead: extract the main brief alone (small, fast, well
+        # within limits), then summarize each supporting doc in its OWN
+        # separate, smaller call below, spacing token usage out over time
+        # rather than concentrating it in one request.
+        progress('Reading the brief...', 5)
         extract_prompt = (
-            doc_intro +
             'Read this client brief, ITT or scope document carefully. Extract ALL available information. Return ONLY valid JSON with NO markdown or explanation.\n'
             'CRITICAL: every string value must be valid JSON. Escape all double quotes as \\" and avoid '
             'using straight or curly apostrophes inside values where possible — rephrase rather than quote '
@@ -978,26 +973,17 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
         if pdf_b64:
             msg_content = [
                 {'type': 'document', 'source': {'type': 'base64', 'media_type': 'application/pdf', 'data': pdf_b64}},
+                {'type': 'text', 'text': extract_prompt},
             ]
-            for doc in supporting_docs_b64:
-                msg_content.append({'type': 'document', 'source': {'type': 'base64', 'media_type': 'application/pdf', 'data': doc['b64']}})
-            msg_content.append({'type': 'text', 'text': extract_prompt})
         else:
-            # Text-pasted brief — supporting PDFs still get attached as
-            # document blocks alongside the pasted text.
-            msg_content = [{'type': 'text', 'text': extract_prompt + '\n\nBrief:\n' + (brief_text or '')[:4000]}]
-            for doc in supporting_docs_b64:
-                msg_content.append({'type': 'document', 'source': {'type': 'base64', 'media_type': 'application/pdf', 'data': doc['b64']}})
-            if not supporting_docs_b64:
-                msg_content = msg_content[0]['text']  # keep simple string form when no docs attached
+            msg_content = extract_prompt + '\n\nBrief:\n' + (brief_text or '')[:4000]
 
         resp = None
         for attempt in range(4):
             try:
                 if attempt > 0:
                     wait = [0, 25, 45, 70][attempt]
-                    progress(f'Rate limit reached — retrying extraction in {wait}s... '
-                             f'(this brief has {1 + len(supporting_docs_b64)} document(s) attached)', 5)
+                    progress(f'Rate limit reached — retrying extraction in {wait}s...', 5)
                     time.sleep(wait)
                 resp = client.messages.create(
                     model='claude-sonnet-4-6',
@@ -1008,8 +994,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
             except anthropic.RateLimitError:
                 if attempt == 3:
                     raise ValueError(
-                        'Rate limit reached reading the brief and supporting documents. '
-                        'Try again in a minute, or resubmit with fewer supporting documents attached.'
+                        'Rate limit reached reading the brief. Try again in a minute.'
                     )
         raw = resp.content[0].text.replace('```json', '').replace('```', '').strip()
         m = re.search(r'\{[\s\S]*\}', raw)
@@ -1060,6 +1045,65 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
             'design_approach':       ex.get('design_approach', ''),
             'date':                  time.strftime('%-d %B %Y'),
         }
+
+        # ── STEP 1b: SUMMARISE SUPPORTING DOCUMENTS (each its own call) ─────
+        # Deliberately NOT combined into the main extraction call above —
+        # see the comment there. Each supporting doc gets its own small,
+        # focused summarisation call (short max_tokens, asks for a brief
+        # note rather than full extraction), with a pause between calls so
+        # token usage is spread across the per-minute window rather than
+        # concentrated in one request.
+        supporting_summaries = []
+        if supporting_docs_b64:
+            for i, doc in enumerate(supporting_docs_b64):
+                progress(f'Reading supporting document {i+1} of {len(supporting_docs_b64)}: {doc["name"]}...', 6)
+                summary_prompt = (
+                    f'This is a supporting context document called "{doc["name"]}", attached alongside '
+                    'a primary client brief for a hospitality interior design proposal. Read it and write '
+                    'a concise note (4-8 sentences) covering only information relevant to a design proposal: '
+                    'spaces, tiers, capacities, budgets, constraints, requirements, names, dates. Skip anything '
+                    'not relevant to scoping interior design work. Do not invent information not present in the '
+                    'document. Return plain text only, no markdown, no headers.'
+                )
+                doc_msg_content = [
+                    {'type': 'document', 'source': {'type': 'base64', 'media_type': 'application/pdf', 'data': doc['b64']}},
+                    {'type': 'text', 'text': summary_prompt},
+                ]
+                doc_resp = None
+                for attempt in range(3):
+                    try:
+                        if attempt > 0:
+                            wait = [0, 25, 45][attempt]
+                            progress(f'Rate limit — retrying {doc["name"]} in {wait}s...', 6)
+                            time.sleep(wait)
+                        doc_resp = client.messages.create(
+                            model='claude-sonnet-4-6',
+                            max_tokens=400,
+                            messages=[{'role': 'user', 'content': doc_msg_content}]
+                        )
+                        break
+                    except anthropic.RateLimitError:
+                        if attempt == 2:
+                            doc_resp = None
+                    except Exception:
+                        doc_resp = None
+                        break
+                if doc_resp is not None:
+                    summary_text = doc_resp.content[0].text.strip()
+                    supporting_summaries.append(f'[{doc["name"]}]: {summary_text}')
+                else:
+                    supporting_summaries.append(
+                        f'[{doc["name"]}]: Could not be read — rate limit or processing error. '
+                        'Review this document manually before sending the proposal.'
+                    )
+                # Brief pause between supporting-doc calls, and before the
+                # next stage of the pipeline, to spread token usage over time
+                # rather than bursting several calls back to back.
+                if i < len(supporting_docs_b64) - 1:
+                    time.sleep(8)
+
+        if supporting_summaries:
+            meta['supporting_context'] = '\n\n'.join(supporting_summaries)
         update_job(job_id, meta=meta)
         raw_spaces = ex.get('spaces', [])
         spaces_text = '\n'.join(

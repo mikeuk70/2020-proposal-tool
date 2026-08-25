@@ -1099,8 +1099,10 @@ def strip_html(txt):
     clean = clean.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&nbsp;', ' ')
     return ' '.join(clean.split())
 
-def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supporting_docs_b64=None):
-    """Background thread: extract → research → generate → build PPTX."""
+def run_extraction(job_id, pdf_b64=None, brief_text=None, prior_work='', supporting_docs_b64=None):
+    """Thread 1: read the brief, extract structured data, then pause for
+    triage confirmation before generation starts. Sets status to
+    'awaiting_confirmation' when done so the frontend shows Screen A."""
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     supporting_docs_b64 = supporting_docs_b64 or []
     pipeline_start_ts = time.time()
@@ -1108,7 +1110,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
     log_usage_event(
         job_id, 'started',
         input_type='pdf' if pdf_b64 else 'text',
-        num_supporting_docs=len(supporting_docs_b64),
+        num_supporting_docs=supporting_docs_count,
         has_prior_work=bool(prior_work),
     )
 
@@ -1417,7 +1419,38 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
 
         progress(f'Brief read — {meta["client"] or "client"} / {meta["venue"] or "project"}', 10)
 
-        # ── STEP 2: RESEARCH ─────────────────────────────────────────────────
+        # Extraction complete. Store everything needed for generation and pause.
+        # The frontend detects 'awaiting_confirmation' and shows Screen A.
+        # If proceed_direct is True, the frontend calls /confirm immediately
+        # and generation starts without user interaction.
+        update_job(job_id,
+                   status='awaiting_confirmation',
+                   meta=meta,
+                   spaces_text=spaces_text,
+                   pipeline_start_ts=pipeline_start_ts,
+                   supporting_docs_b64_count=len(supporting_docs_b64))
+
+    except Exception as e:
+        update_job(job_id, status='error', error=str(e))
+        progress(f'Error reading brief: {e}', None)
+
+
+def run_generation(job_id):
+    """Thread 2: research → sections → build PPTX. Started only after
+    /confirm is called with triage-confirmed meta fields."""
+    job = load_job(job_id) or {}
+    meta = job.get('meta', {})
+    spaces_text = job.get('spaces_text', '') or meta.get('scope', 'Not listed')
+    pipeline_start_ts = job.get('pipeline_start_ts', time.time())
+    supporting_docs_count = job.get('supporting_docs_b64_count', 0)
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+    def progress(msg, pct=None):
+        append_progress(job_id, msg, pct)
+
+    update_job(job_id, status='running')
+
+    try:
         progress('Researching the client...', 15)
         time.sleep(12)  # Let rate limit recover after extraction
 
@@ -1460,7 +1493,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
         # enough slack on lower usage tiers. This doesn't remove the
         # underlying ceiling (see console.anthropic.com/settings/limits) but
         # reduces how often a complex, multi-document brief trips it.
-        GAP = 14 if supporting_docs_b64 else 7
+        GAP = 14 if supporting_docs_count > 0 else 7
 
         for i, (sid, label, prompt_tpl) in enumerate(SECTIONS):
             pct = 20 + int((i / total) * 65)
@@ -1539,7 +1572,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
                 brief_type=meta.get('brief_type', ''), is_riba=meta.get('is_riba', ''),
                 pptx_ready=True,
                 duration_seconds=round(time.time() - pipeline_start_ts, 1),
-                num_supporting_docs=len(supporting_docs_b64),
+                num_supporting_docs=supporting_docs_count,
             )
         except Exception as pptx_err:
             import traceback
@@ -1552,7 +1585,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
                 brief_type=meta.get('brief_type', ''), is_riba=meta.get('is_riba', ''),
                 pptx_ready=False, error=str(pptx_err)[:200],
                 duration_seconds=round(time.time() - pipeline_start_ts, 1),
-                num_supporting_docs=len(supporting_docs_b64),
+                num_supporting_docs=supporting_docs_count,
             )
 
     except Exception as e:
@@ -1567,7 +1600,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
                 client=meta_for_log.get('client', ''), venue=meta_for_log.get('venue', ''),
                 error=str(e)[:200],
                 duration_seconds=round(time.time() - pipeline_start_ts, 1),
-                num_supporting_docs=len(supporting_docs_b64),
+                num_supporting_docs=supporting_docs_count,
             )
         else:
             update_job(job_id, status='error', error=str(e))
@@ -1576,7 +1609,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
                 client=meta_for_log.get('client', ''), venue=meta_for_log.get('venue', ''),
                 error=str(e)[:200],
                 duration_seconds=round(time.time() - pipeline_start_ts, 1),
-                num_supporting_docs=len(supporting_docs_b64),
+                num_supporting_docs=supporting_docs_count,
             )
         progress(f'Error: {e}', None)
 
@@ -1628,6 +1661,8 @@ nav{background:var(--nv);padding:0 2rem;display:flex;align-items:center;
 .tab-btn.active{background:var(--nv);color:var(--white)}
 .tab-btn.inactive{background:var(--bg);color:var(--tx2);border-left:1px solid var(--bd)}
 .field-label{display:block;font-size:12px;font-weight:600;margin-bottom:5px;color:var(--tx2)}
+.confirm-question{margin-top:5px;padding:6px 10px;background:#FFF8ED;border-left:3px solid #C9A84C;border-radius:0 4px 4px 0;font-size:12px;color:#C9A84C;font-style:italic}
+.confirm-field-amber input,.confirm-field-amber select{border-color:#C9A84C !important}
 input[type=file]{display:block;width:100%;font-size:13px;padding:8px;
   border:1px solid var(--bd);border-radius:var(--r);background:var(--bg);cursor:pointer;font-family:inherit}
 textarea{width:100%;font-size:13px;padding:10px;border:1px solid var(--bd);
@@ -1801,9 +1836,90 @@ textarea:focus{border-color:var(--nv)}
     </div>
   </div>
 
+  <!-- SCREEN A — BRIEF CONFIRMATION (appears after extraction, before generation) -->
+  <div class="panel hidden" id="panel-confirm">
+    <div class="panel-head"><h2>Confirm brief</h2><span class="step-badge">Screen A — before generating</span></div>
+    <div class="panel-body">
+
+      <!-- Summary strip -->
+      <div id="confirm-summary" style="padding:10px 14px;border-radius:6px;margin-bottom:1rem;font-size:13px;font-weight:500"></div>
+
+      <!-- Internal notes warning (only shown if detected) -->
+      <div id="confirm-notes-warning" class="hidden" style="background:#FFF8ED;border:1px solid #C9A84C;border-radius:6px;padding:10px 14px;margin-bottom:1rem;font-size:13px;color:#C9A84C"></div>
+
+      <!-- Confirmed fields grid -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1rem">
+
+        <div>
+          <label class="field-label">Project type</label>
+          <select id="c-project-type" class="t-sel" onchange="onTriageFieldChange('project_type')">
+            <option value="hospitality">Hospitality / Interior design</option>
+            <option value="graphics_brand">Graphics &amp; Brand</option>
+            <option value="strategy_brand">Brand strategy</option>
+            <option value="tender_itt">Formal tender / ITT</option>
+            <option value="cruise_fitout">Cruise / Fit-out</option>
+            <option value="unknown">Unclear — needs discussion</option>
+          </select>
+          <div id="q-project-type" class="confirm-question hidden"></div>
+        </div>
+
+        <div>
+          <label class="field-label">Client name</label>
+          <input type="text" id="c-client" class="t-sel" oninput="onTriageFieldChange('client')" placeholder="Client name">
+          <div id="q-client" class="confirm-question hidden"></div>
+        </div>
+
+        <div>
+          <label class="field-label">Venue / project</label>
+          <input type="text" id="c-venue" class="t-sel" oninput="onTriageFieldChange('venue')" placeholder="Venue or project name">
+        </div>
+
+        <div>
+          <label class="field-label">Contact name</label>
+          <input type="text" id="c-contact" class="t-sel" oninput="onTriageFieldChange('contact')" placeholder="Primary contact">
+        </div>
+
+        <div>
+          <label class="field-label">Scope</label>
+          <input type="text" id="c-scope" class="t-sel" oninput="onTriageFieldChange('scope_plain')" placeholder="Plain-English description of the work">
+        </div>
+
+        <div>
+          <label class="field-label">Brief source</label>
+          <select id="c-brief-source" class="t-sel" onchange="onTriageFieldChange('brief_source')">
+            <option value="Direct approach">Direct approach</option>
+            <option value="Via architect or PM">Via architect or PM</option>
+            <option value="Formal open tender (ITT)">Formal tender / ITT</option>
+            <option value="Referral">Referral</option>
+            <option value="Repeat client">Repeat client</option>
+            <option value="Unknown">Unknown</option>
+          </select>
+        </div>
+
+      </div>
+
+      <!-- Internal notes question (only shown if detected) -->
+      <div id="confirm-notes-question" class="hidden" style="margin-bottom:1rem">
+        <label class="field-label" style="color:#C9A84C">⚠ Internal notes detected</label>
+        <p style="font-size:12px;color:var(--tx2);margin-bottom:6px">The brief appears to contain internal observations that should not appear in the proposal. The generator will automatically exclude them, but you may want to review before generating.</p>
+        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="c-notes-confirmed" onchange="checkCanGenerate()">
+          Understood — proceed anyway
+        </label>
+      </div>
+
+      <div id="confirm-questions-remaining" style="font-size:12px;color:#A32D2D;margin-bottom:.75rem;display:none"></div>
+
+      <button class="btn btn-primary" id="confirm-btn" onclick="submitConfirm()" disabled>
+        Confirm and generate →
+      </button>
+      <span style="font-size:12px;color:var(--tx2);margin-left:1rem">Generation will start immediately after confirmation.</span>
+    </div>
+  </div>
+
   <!-- TRIAGE NOTES -->
-  <div class="panel hidden" id="panel-triage">
-    <div class="panel-head"><h2>Triage</h2><span class="step-badge">Complete while generating</span></div>
+  <div class="panel hidden" id="panel-winlikelihood">
+    <div class="panel-head"><h2>Win likelihood</h2><span class="step-badge">Complete while generating — Screen B</span></div>
     <div class="panel-body">
       <p style="font-size:12px;color:var(--tx2);margin-bottom:1rem">For internal use only — informs win likelihood score. Not sent to the AI.</p>
 
@@ -1957,6 +2073,145 @@ function switchTab(t) {
   document.getElementById('tab-text').className = 'tab-btn ' + (t === 'text' ? 'active' : 'inactive');
 }
 
+// ── SCREEN A — BRIEF CONFIRMATION ─────────────────────────────────────────
+// Populated when pollStatus detects status === 'awaiting_confirmation'.
+// Tracks which questions are unresolved to gate the Generate button.
+
+var triageQuestions = {};   // { fieldKey: questionText } — questions currently visible
+var triageAnswered  = {};   // { fieldKey: true } — questions resolved by user edit
+var hasInternalNotes = false;
+
+function populateConfirmScreen(data) {
+  var meta = data.meta || {};
+
+  // Summary strip
+  var summaryEl = document.getElementById('confirm-summary');
+  var summary = data.brief_summary || '';
+  var isLowConf = data.project_type_confidence === 'low' || data.client_confidence === 'low';
+  summaryEl.style.background = isLowConf ? '#FFF8ED' : '#EAF3DE';
+  summaryEl.style.border = '1px solid ' + (isLowConf ? '#C9A84C' : '#B7D89A');
+  summaryEl.style.color = isLowConf ? '#C9A84C' : '#3B6D11';
+  summaryEl.textContent = (isLowConf ? '⚠  ' : '✓  ') + (summary || 'Brief read successfully.');
+
+  // Populate editable fields
+  var ptSel = document.getElementById('c-project-type');
+  if (data.project_type) {
+    for (var i = 0; i < ptSel.options.length; i++) {
+      if (ptSel.options[i].value === data.project_type) { ptSel.selectedIndex = i; break; }
+    }
+  }
+  document.getElementById('c-client').value  = meta.client  || '';
+  document.getElementById('c-venue').value   = meta.venue   || '';
+  document.getElementById('c-contact').value = meta.contact || '';
+  document.getElementById('c-scope').value   = data.scope_plain || meta.scope || '';
+  var bsSel = document.getElementById('c-brief-source');
+  var bs = data.brief_source || meta.brief_source || '';
+  for (var j = 0; j < bsSel.options.length; j++) {
+    if (bsSel.options[j].value === bs) { bsSel.selectedIndex = j; break; }
+  }
+
+  // Register questions
+  triageQuestions = {};
+  triageAnswered  = {};
+
+  function setQuestion(fieldKey, inputId, questionId, questionText, confidence) {
+    if (confidence === 'low' || confidence === 'medium') {
+      triageQuestions[fieldKey] = questionText;
+      var qEl = document.getElementById(questionId);
+      if (qEl && questionText) {
+        qEl.textContent = '⚠ ' + questionText;
+        qEl.classList.remove('hidden');
+        var inputEl = document.getElementById(inputId);
+        if (inputEl && inputEl.parentElement) inputEl.parentElement.classList.add('confirm-field-amber');
+      }
+    }
+  }
+
+  setQuestion('project_type', 'c-project-type', 'q-project-type',
+    data.project_type_question, data.project_type_confidence);
+  setQuestion('client', 'c-client', 'q-client',
+    data.client_question, data.client_confidence);
+
+  // Internal notes
+  hasInternalNotes = (data.contains_internal_notes === 'yes');
+  if (hasInternalNotes) {
+    var desc = data.internal_notes_description || 'Internal notes detected in the brief.';
+    document.getElementById('confirm-notes-warning').textContent = '⚠ ' + desc;
+    document.getElementById('confirm-notes-warning').classList.remove('hidden');
+    document.getElementById('confirm-notes-question').classList.remove('hidden');
+  }
+
+  checkCanGenerate();
+}
+
+function onTriageFieldChange(fieldKey) {
+  // Mark this question as resolved once the user edits the field
+  if (triageQuestions[fieldKey]) {
+    triageAnswered[fieldKey] = true;
+    var qEl = document.getElementById('q-' + fieldKey.replace('_', '-'));
+    if (qEl) qEl.classList.add('hidden');
+    var inputId = fieldKey === 'project_type' ? 'c-project-type' :
+                  fieldKey === 'client' ? 'c-client' : null;
+    if (inputId) {
+      var inputEl = document.getElementById(inputId);
+      if (inputEl && inputEl.parentElement) inputEl.parentElement.classList.remove('confirm-field-amber');
+    }
+  }
+  checkCanGenerate();
+}
+
+function checkCanGenerate() {
+  var unresolvedCount = 0;
+  for (var key in triageQuestions) {
+    if (!triageAnswered[key]) unresolvedCount++;
+  }
+  if (hasInternalNotes && !document.getElementById('c-notes-confirmed').checked) {
+    unresolvedCount++;
+  }
+  var btn = document.getElementById('confirm-btn');
+  var rem = document.getElementById('confirm-questions-remaining');
+  if (unresolvedCount === 0) {
+    btn.disabled = false;
+    rem.style.display = 'none';
+  } else {
+    btn.disabled = true;
+    rem.textContent = unresolvedCount + ' question' + (unresolvedCount > 1 ? 's' : '') + ' need' + (unresolvedCount === 1 ? 's' : '') + ' resolving before generating.';
+    rem.style.display = 'block';
+  }
+}
+
+async function submitConfirm() {
+  var btn = document.getElementById('confirm-btn');
+  btn.disabled = true;
+  btn.textContent = 'Starting generation…';
+
+  var payload = {
+    project_type: document.getElementById('c-project-type').value,
+    client:       document.getElementById('c-client').value.trim(),
+    venue:        document.getElementById('c-venue').value.trim(),
+    contact:      document.getElementById('c-contact').value.trim(),
+    scope_plain:  document.getElementById('c-scope').value.trim(),
+    brief_source: document.getElementById('c-brief-source').value,
+  };
+
+  try {
+    var resp = await fetch('/confirm/' + currentJobId, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    var data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    // Hide Screen A, resume polling — generation is now running
+    document.getElementById('panel-confirm').classList.add('hidden');
+    pollInterval = setInterval(pollStatus, 2000);
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = 'Confirm and generate →';
+    alert('Could not start generation: ' + e.message);
+  }
+}
+
 function togglePriorWork() {
   var chk = document.getElementById('prior-work-toggle');
   document.getElementById('prior-work-panel').style.display = chk.checked ? 'block' : 'none';
@@ -2063,10 +2318,31 @@ async function pollStatus() {
       renderSections(data.sections);
     }
 
-    // Store meta and reveal triage panel
+    // Screen A — brief confirmation
+    if (data.status === 'awaiting_confirmation') {
+      clearInterval(pollInterval);  // Pause polling — waiting for user
+      pollInterval = null;
+      document.getElementById('panel-confirm').classList.remove('hidden');
+      populateConfirmScreen(data);
+      // Auto-confirm immediately if extraction was high-confidence
+      if (data.proceed_direct === true) {
+        // Small delay so the user sees the screen briefly before it advances
+        setTimeout(function() {
+          // Only auto-confirm if no questions were actually registered
+          var hasQ = Object.keys(triageQuestions).length > 0;
+          if (!hasQ && !hasInternalNotes) {
+            submitConfirm();
+          }
+          // If questions exist despite proceed_direct=true, let the user resolve them
+        }, 800);
+      }
+      return;  // Don't process any other status logic while awaiting
+    }
+
+    // Store meta and reveal Screen B (win likelihood) during generation
     if (data.meta && data.meta.client) {
       currentMeta = data.meta;
-      document.getElementById('panel-triage').classList.remove('hidden');
+      document.getElementById('panel-winlikelihood').classList.remove('hidden');
     }
 
     // Done
@@ -2285,7 +2561,7 @@ function resetAll() {
   document.getElementById('submit-btn').disabled = false;
   document.getElementById('submit-btn').textContent = 'Generate proposal →';
   document.getElementById('nav-status').textContent = '';
-  ['panel-progress','panel-triage','panel-sections','panel-intel','panel-actions'].forEach(function(id) {
+  ['panel-progress','panel-confirm','panel-winlikelihood','panel-sections','panel-intel','panel-actions'].forEach(function(id) {
     document.getElementById(id).classList.add('hidden');
   });
   document.getElementById('submit-error').classList.add('hidden');
@@ -2483,12 +2759,51 @@ def submit():
         print('SUBMIT ERROR:', traceback.format_exc())
         return jsonify({'error': f'Could not process the upload: {str(e)[:200]}'}), 500
 
-    t = threading.Thread(target=run_pipeline,
+    t = threading.Thread(target=run_extraction,
                           args=(job_id, pdf_b64, brief_text, prior_work, supporting_docs_b64),
                           daemon=True)
     t.start()
 
     return jsonify({'job_id': job_id})
+
+
+@app.route('/confirm/<job_id>', methods=['POST'])
+def confirm(job_id):
+    """Screen A confirmation endpoint. Accepts triage-corrected meta fields,
+    merges them into the job's extracted meta, then starts run_generation in
+    a new thread. Called automatically by the frontend when proceed_direct is
+    true (clean brief), or when the user clicks Generate on Screen A."""
+    job = load_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    if job.get('status') not in ('awaiting_confirmation', 'running'):
+        return jsonify({'error': f'Job is not awaiting confirmation (status: {job.get("status")})'}), 400
+
+    data = request.get_json() or {}
+    meta = job.get('meta', {})
+
+    # Merge any user corrections from the triage screen into meta.
+    # Only update fields that were actually sent (empty string = intentionally
+    # cleared; absent key = user didn't touch it, keep extraction value).
+    triage_fields = ['project_type', 'client', 'venue', 'contact', 'brief_source', 'scope_plain']
+    for field in triage_fields:
+        if field in data:
+            meta[field] = data[field]
+            # Keep scope consistent
+            if field == 'scope_plain':
+                meta['scope'] = data[field]
+
+    # If project type was corrected, update is_riba accordingly
+    if 'project_type' in data:
+        pt = data['project_type']
+        meta['is_riba'] = 'yes' if pt in ('hospitality',) and 'riba' in meta.get('riba_stages','').lower() else meta.get('is_riba','no')
+        if pt not in ('hospitality',):
+            meta['is_riba'] = 'no'
+
+    update_job(job_id, meta=meta, status='running')
+    t = threading.Thread(target=run_generation, args=(job_id,), daemon=True)
+    t.start()
+    return jsonify({'ok': True})
 
 @app.route('/debug/<job_id>')
 def debug(job_id):
@@ -2513,15 +2828,28 @@ def status(job_id):
     job = load_job(job_id)
     if not job:
         return jsonify({'error': 'Job not found'}), 404
+    meta = job.get('meta', {})
     return jsonify({
-        'status':     job.get('status'),
-        'progress':   job.get('progress', []),
-        'sections':   job.get('sections', []),
-        'meta':       job.get('meta', {}),
-        'intel':      job.get('intel', {}),
-        'error':      job.get('error'),
-        'pptx_error': job.get('pptx_error'),
-        'pptx_ready': bool(job.get('pptx_path') and os.path.exists(job.get('pptx_path',''))),
+        'status':       job.get('status'),
+        'progress':     job.get('progress', []),
+        'sections':     job.get('sections', []),
+        'meta':         meta,
+        'intel':        job.get('intel', {}),
+        'error':        job.get('error'),
+        'pptx_error':   job.get('pptx_error'),
+        'pptx_ready':   bool(job.get('pptx_path') and os.path.exists(job.get('pptx_path',''))),
+        # Triage fields — consumed by Screen A
+        'proceed_direct':        meta.get('proceed_direct', True),
+        'brief_summary':         meta.get('brief_summary', ''),
+        'project_type':          meta.get('project_type', ''),
+        'project_type_confidence': meta.get('project_type_confidence', 'high'),
+        'project_type_question': meta.get('project_type_question', ''),
+        'client_confidence':     meta.get('client_confidence', 'high'),
+        'client_question':       meta.get('client_question', ''),
+        'contains_internal_notes': meta.get('contains_internal_notes', 'no'),
+        'internal_notes_description': meta.get('internal_notes_description', ''),
+        'scope_plain':           meta.get('scope_plain', meta.get('scope', '')),
+        'brief_source':          meta.get('brief_source', ''),
     })
 
 @app.route('/rebuild', methods=['POST'])

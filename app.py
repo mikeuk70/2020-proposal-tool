@@ -136,6 +136,10 @@ app.config['MAX_CONTENT_LENGTH'] = 40 * 1024 * 1024  # 40MB max upload — main 
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+# Shared secret for the /usage dashboard — set USAGE_DASHBOARD_KEY in
+# Railway's environment variables. Without it, /usage refuses all access
+# rather than defaulting to open, since the dashboard shows client names.
+USAGE_DASHBOARD_KEY = os.environ.get('USAGE_DASHBOARD_KEY', '')
 # Find template file - check several locations
 _here = os.path.dirname(os.path.abspath(__file__))
 _candidates = [
@@ -191,6 +195,95 @@ def append_section(job_id, section):
     secs.append(section)
     job['sections'] = secs
     save_job(job_id, job)
+
+
+# ── USAGE LOG ─────────────────────────────────────────────────────────────────
+# Tracks every generation attempt so usage can be reviewed later (client,
+# venue, brief type, outcome, duration). Append-only JSONL — one JSON object
+# per line — so a single corrupted line never breaks the whole file, and
+# writes never need to read the existing file first.
+#
+# IMPORTANT — persistence: JOBS_DIR lives under tempfile.gettempdir(), which
+# on Railway is ephemeral storage wiped on every redeploy/restart. This log
+# file lives in the same place and has the same limitation. It is NOT a
+# substitute for a real database if usage data needs to survive redeploys
+# long-term — treat this as a working solution to get visibility now, and
+# revisit storage (e.g. a Railway volume, or writing to an external sheet/DB)
+# if this data needs to be durable indefinitely.
+USAGE_LOG_PATH = os.path.join(JOBS_DIR, '_usage_log.jsonl')
+
+def log_usage_event(job_id, event, **fields):
+    """Append one usage event. event is a short string like 'started',
+    'completed', 'failed'. Extra fields (client, venue, brief_type, etc.)
+    are merged in. Never raises — a logging failure should never break
+    the actual proposal generation."""
+    try:
+        entry = {
+            'ts': time.time(),
+            'date': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'job_id': job_id,
+            'event': event,
+        }
+        entry.update(fields)
+        with open(USAGE_LOG_PATH, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+    except Exception:
+        pass
+
+def read_usage_log():
+    """Read all usage events, oldest first. Skips any corrupted lines
+    rather than failing the whole read."""
+    events = []
+    if not os.path.exists(USAGE_LOG_PATH):
+        return events
+    with open(USAGE_LOG_PATH, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except Exception:
+                continue
+    return events
+
+def migrate_existing_jobs_to_usage_log():
+    """Best-effort backfill: scan whatever job .json files currently exist
+    in JOBS_DIR and add a 'completed'/'failed' usage event for any job not
+    already represented in the usage log. Only catches jobs that survived
+    up to the most recent server restart — JOBS_DIR is ephemeral, so this
+    cannot recover jobs from before a redeploy that already happened.
+    Returns a summary dict so the caller can report exactly what happened."""
+    existing_job_ids = {e.get('job_id') for e in read_usage_log()}
+    found, migrated, skipped = 0, 0, 0
+    if not os.path.isdir(JOBS_DIR):
+        return {'found': 0, 'migrated': 0, 'skipped': 0}
+    for fname in os.listdir(JOBS_DIR):
+        if not fname.endswith('.json') or fname.startswith('_'):
+            continue
+        job_id = fname[:-5]
+        found += 1
+        if job_id in existing_job_ids:
+            skipped += 1
+            continue
+        job = load_job(job_id)
+        if not job:
+            skipped += 1
+            continue
+        meta = job.get('meta', {})
+        status = job.get('status', 'unknown')
+        log_usage_event(
+            job_id, 'completed' if status == 'done' else status,
+            client=meta.get('client', ''),
+            venue=meta.get('venue', ''),
+            brief_type=meta.get('brief_type', ''),
+            is_riba=meta.get('is_riba', ''),
+            error=job.get('error', ''),
+            pptx_ready=bool(job.get('pptx_path') and os.path.exists(job.get('pptx_path', ''))),
+            migrated_from_job_file=True,
+        )
+        migrated += 1
+    return {'found': found, 'migrated': migrated, 'skipped': skipped}
 
 
 # ── NAMESPACES ────────────────────────────────────────────────────────────────
@@ -723,7 +816,16 @@ def build_pptx(sections, meta):
 
 
 # ── AI PIPELINE ───────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are a proposal writer for 20.20 Design Agency, a specialist hospitality and stadium interior design consultancy. You write first-draft proposals that the account team will review and refine.
+SYSTEM_PROMPT = """You are a proposal writer for 20.20 Design Agency, a design consultancy specialising in hospitality interiors, stadium design, brand identity, graphics, environmental design, and wayfinding. You write first-draft proposals that the account team will review and refine.
+
+The PROJECT TYPE field in context tells you what kind of proposal this is. Follow it precisely:
+- HOSPITALITY / INTERIOR DESIGN: spatial language, guest journey, hospitality tiers, CGI renders, RIBA stages if applicable
+- GRAPHICS AND BRAND: graphic design language, print specifications, artwork delivery, brand guidelines — no spatial plans, no CGI, no RIBA stages
+- BRAND STRATEGY: strategic frameworks, workshop outputs, positioning documents — no physical deliverables
+- FORMAL TENDER / ITT RESPONSE: formal tone, respond to evaluation criteria, include assumptions and exclusions
+- CRUISE / FIT-OUT: shipyard phase gate language, technical specifications, information release schedule
+
+If the project type is unclear or flagged as catering/operations, write conservatively and flag the uncertainty.
 
 VOICE: Confident, direct, commercially aware, personal. Short sentences. Active voice. No em dashes. No AI phrases (leveraging, seamless, holistic, transformative). The client name appears only in the cover letter — all other sections say "the club", "the venue", "the project".
 
@@ -855,6 +957,7 @@ def build_context(meta, spaces_text=''):
     continuation = meta.get('continuation','no')
     prior = meta.get('prior_stages_completed','')
     second = meta.get('second_contact','')
+    project_type = meta.get('project_type', '')
 
     # Stage context line
     if riba:
@@ -870,21 +973,56 @@ def build_context(meta, spaces_text=''):
 
     is_riba_flag = meta.get('is_riba','yes').lower()
     ctx = f"PROJECT: {meta.get('venue','')}\n"
+
+    # Project type — the primary signal for template and terminology selection.
+    # Written explicitly so every section prompt knows what kind of proposal this is.
+    pt_labels = {
+        'hospitality':       'HOSPITALITY / INTERIOR DESIGN — use spatial language, guest journey, tiers, hospitality pyramid',
+        'graphics_brand':    'GRAPHICS AND BRAND — use graphic design language. No CGI, no spatial plans, no RIBA stages. Deliverables are artwork files, guidelines, print-ready assets.',
+        'strategy_brand':    'BRAND STRATEGY — use strategy and brand language. Deliverables are frameworks, guidelines, workshop outputs. No physical design deliverables.',
+        'tender_itt':        'FORMAL TENDER / ITT RESPONSE — formal tone, respond to stated selection criteria, include assumptions and exclusions, structure around the client\'s evaluation framework.',
+        'cruise_fitout':     'CRUISE / FIT-OUT — structure around shipyard phase gates and information release schedule. No hospitality pyramid. Deliverables are technical drawings and specifications.',
+        'catering_operations': 'CATERING / OPERATIONS — NOTE: this does not appear to be a design brief. Confirm the actual scope before generating.',
+        'unknown':           'PROJECT TYPE UNCLEAR — write with caution, flag assumptions.',
+    }
+    pt_label = pt_labels.get(project_type, f'PROJECT TYPE: {project_type or "not determined"}')
+    ctx += f"PROJECT TYPE: {pt_label}\n"
+
     ctx += f"RIBA STAGED PROJECT: {'YES — respond using RIBA stage structure and terminology' if is_riba_flag == 'yes' else 'NO — this is a phase-based or single-scope project, do not use RIBA stage references'}\n"
     ctx += f"CLIENT: {meta.get('client','')}\n"
     ctx += f"CONTACT: {contact_line}\n"
     if meta.get('lead_architect'): ctx += f"LEAD ARCHITECT/DESIGN TEAM: {meta['lead_architect']}\n"
     if meta.get('project_manager'): ctx += f"PROJECT MANAGER: {meta['project_manager']}\n"
     ctx += f"BRIEF TYPE: {bt}\n"
+    ctx += f"BRIEF SOURCE: {meta.get('brief_source','')}\n"
     ctx += f"CONTINUATION OF PRIOR WORK: {continuation.upper()}\n"
     if prior: ctx += f"PRIOR STAGES / CONTEXT: {prior}\n"
     ctx += f"{stage_ctx}\n"
     ctx += f"BUDGET: {meta.get('budget','Not stated')}\n"
     if meta.get('tier_summary'): ctx += f"HOSPITALITY TIERS: {meta['tier_summary']}\n"
 
+    # Graphics/brand specific context
+    if meta.get('deliverable_types'):
+        ctx += f"DELIVERABLES EXPECTED: {meta['deliverable_types']}\n"
+    if meta.get('print_required') == 'yes':
+        ctx += "PRINT REQUIRED: Yes — include CMYK, print-ready artwork, file format specs in deliverables.\n"
+    if meta.get('brand_guidelines_exist') == 'yes':
+        ctx += "EXISTING BRAND GUIDELINES: Yes — design must work within confirmed brand guidelines, not develop new ones from scratch.\n"
+    elif meta.get('brand_guidelines_exist') == 'no':
+        ctx += "EXISTING BRAND GUIDELINES: No — brand language and visual system to be developed as part of this project.\n"
+
+    # Internal notes warning — so the model doesn't repeat internal content in the proposal
+    if meta.get('contains_internal_notes') == 'yes':
+        ctx += (f"\nINTERNAL NOTES DETECTED: The brief appears to contain internal observations "
+                f"that should NOT appear in the client-facing proposal. "
+                f"{meta.get('internal_notes_description','')} "
+                f"Focus only on the actual client requirements and project scope.\n")
+
     # Spaces
     if spaces_text:
         ctx += f"SPACES:\n{spaces_text}\n"
+    elif meta.get('scope_plain'):
+        ctx += f"SCOPE: {meta['scope_plain']}\n"
     elif meta.get('scope'):
         ctx += f"SCOPE: {meta['scope']}\n"
 
@@ -965,6 +1103,14 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
     """Background thread: extract → research → generate → build PPTX."""
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     supporting_docs_b64 = supporting_docs_b64 or []
+    pipeline_start_ts = time.time()
+
+    log_usage_event(
+        job_id, 'started',
+        input_type='pdf' if pdf_b64 else 'text',
+        num_supporting_docs=len(supporting_docs_b64),
+        has_prior_work=bool(prior_work),
+    )
 
     def progress(msg, pct=None):
         append_progress(job_id, msg, pct)
@@ -982,20 +1128,72 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
         # rather than concentrating it in one request.
         progress('Reading the brief...', 5)
         extract_prompt = (
-            'Read this client brief, ITT or scope document carefully. Extract ALL available information. Return ONLY valid JSON with NO markdown or explanation.\n'
+            'Read this client brief, ITT, scope document, or meeting notes carefully. '
+            'Extract ALL available information. Return ONLY valid JSON with NO markdown or explanation.\n'
             'CRITICAL: every string value must be valid JSON. Escape all double quotes as \\" and avoid '
-            'using straight or curly apostrophes inside values where possible — rephrase rather than quote '
-            'verbatim if a club name or phrase contains an apostrophe (e.g. write "the venue" rather than '
-            'repeating a possessive club name with an apostrophe inside a string). Do not include literal '
-            'line breaks inside a string value — use a single space instead.\n'
+            'using straight or curly apostrophes inside values where possible. Do not include literal '
+            'line breaks inside a string value — use a single space instead.\n\n'
+
+            'STEP 1 — DETERMINE PROJECT TYPE FIRST. This is the most important decision. '
+            'Look for these vocabulary signals before reading anything else:\n'
+            '  HOSPITALITY/INTERIOR: lounge, bar, restaurant, concourse, tier, hospitality, RIBA stage, '
+            'CGI, spatial, interior design, FF&E, furniture, materials, guest journey, seating bowl\n'
+            '  GRAPHICS/BRAND: gift card, packaging, sleeve, artwork, print, CMYK, brand identity, '
+            'tone of voice, guidelines, logo, visual system, typographic, colour palette, brand strategy, '
+            'positioning, propositions, concept routes, templates, signage design, wayfinding\n'
+            '  STRATEGY/BRAND ONLY (no physical deliverables): workshop, archetypes, key messages, '
+            'competitive intelligence, market positioning — with NO spatial or print deliverables mentioned\n'
+            '  TENDER/ITT: ITT, ITN, RFP, tender submission, selection criteria, evaluation criteria, '
+            'Form of Tender, fee return, submission deadline\n'
+            '  CATERING/OPERATIONS (not a design brief): catering contract, menu, kitchen operator, '
+            'F&B provision, catering tender — flag this as catering_operations\n'
+            '  CRUISE/FIT-OUT: shipyard, yard phase, hull number, Engineering Unit, Meyer Werft, '
+            'fit-out, cabin typology, GAP drawing, wayfinding on a vessel\n\n'
+
+            'STEP 2 — ASSESS CONFIDENCE on critical fields. For each, set confidence to:\n'
+            '  high: clear, unambiguous, stated explicitly\n'
+            '  medium: inferable but not explicit, or one strong candidate among minor alternatives\n'
+            '  low: genuinely ambiguous, multiple equally plausible answers, or absent entirely\n\n'
+
+            'STEP 3 — DETECT INTERNAL NOTES. Meeting notes, internal strategy discussions, budget '
+            'observations, staff changes, competitor intelligence, and internal opinions should NOT '
+            'appear in a client-facing proposal. Flag if present.\n\n'
+
             '{\n'
-            '"is_riba": "yes or no. Determine this first. yes = RIBA Plan of Work with numbered stages, architect-led newbuild or refurbishment. no = single space, sponsor lounge, branding, arena, or no RIBA stage references in the brief",\n'
-            '"brief_type": "newbuild | refurb | single_space | sponsor | arena | continuation | itt",\n'
-            '"brief_source": "Direct approach | Via architect or PM | Formal open tender (ITT) | Referral | Repeat client | Unknown",\n'
+
+            # ── PROJECT TYPE (new unified field) ───────────────────────────
+            '"project_type": "hospitality | graphics_brand | strategy_brand | tender_ itt | '
+            'cruise_fitout | catering_operations | unknown — use the vocabulary signals above. '
+            'hospitality covers all interior design work regardless of project scale. '
+            'graphics_brand covers print, packaging, signage design, environmental graphics, brand identity. '
+            'strategy_brand is brand strategy with no physical deliverables. '
+            'tender_itt is any formal tender or ITT response regardless of discipline. '
+            'catering_operations means this is not a design brief at all.",\n'
+            '"project_type_confidence": "high | medium | low",\n'
+            '"project_type_question": "if confidence is medium or low, write the exact plain-language '
+            'question to show the user — e.g. This could be a hospitality or graphics project — which is '
+            'right? Leave empty string if confidence is high.",\n\n'
+
+            # ── EXISTING FIELDS (kept, not broken) ─────────────────────────
+            '"is_riba": "yes or no. yes = RIBA Plan of Work stages explicitly referenced. '
+            'no = phase-based, single-scope, brand, graphics, or no RIBA stage references.",\n'
+            '"brief_type": "newbuild | refurb | single_space | sponsor | arena | continuation | '
+            'itt | graphics | brand | cruise | unknown",\n'
+            '"brief_source": "Direct approach | Via architect or PM | Formal open tender (ITT) | '
+            'Referral | Repeat client | Unknown",\n'
             '"continuation": "yes | no",\n'
-            '"client": "",\n'
+
+            # ── CLIENT (with confidence) ────────────────────────────────────
+            '"client": "the name a 20.20 proposal would be addressed to — usually the organisation '
+            'commissioning the work. If meeting notes mention both a venue operator and a tenant or '
+            'sponsor, choose the one doing the commissioning. If both are plausible, set confidence low.",\n'
+            '"client_confidence": "high | medium | low",\n'
+            '"client_question": "if confidence is medium or low, plain-language question — e.g. The '
+            'brief mentions both Mattioli Woods and Leicester Tigers — which should we use as the client '
+            'name? Leave empty string if confidence is high.",\n\n'
+
             '"venue": "",\n'
-            '"primary_contact": "",\n'
+            '"primary_contact": "first name only if clear, otherwise full name — used in Dear [Name] greeting",\n'
             '"contact_role": "",\n'
             '"second_contact": "",\n'
             '"lead_architect": "name of lead architect or design team lead if mentioned",\n'
@@ -1003,17 +1201,51 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
             '"proposal_deadline": "",\n'
             '"construction_completion": "",\n'
             '"budget_stated": "",\n'
-            '"riba_stages": "exact RIBA stages requested e.g. Stage 2 and 3, or 2.1 2.2 2.3 — be precise",\n'
+            '"riba_stages": "exact RIBA stages requested e.g. Stage 2 and 3 — be precise. '
+            'Leave empty if not a RIBA project.",\n'
             '"stage_2_duration": "weeks if stated",\n'
             '"stage_3_duration": "weeks if stated",\n'
-            '"prior_stages_completed": "any stages already completed e.g. Stage 3 design rejected",\n'
-            '"spaces": [{"name": "", "tier": "Bronze|Silver|Gold|VVIP|GA|GA+", "level": "", "capacity": "", "budget": "", "notes": "specific requirements or constraints for this space"}],\n'
-            '"tier_summary": "e.g. Gold 1372 seats, Silver 642, Bronze 2566",\n'
-            '"key_requirements": "verbatim or near-verbatim key design requirements from the brief",\n'
+            '"prior_stages_completed": "any stages already done e.g. Stage 2 complete",\n'
+            '"spaces": [{"name": "", "tier": "Bronze|Silver|Gold|VVIP|GA|GA+", "level": "", '
+            '"capacity": "", "budget": "", "notes": "specific requirements for this space"}],\n'
+            '"tier_summary": "e.g. Gold 1372 seats, Silver 642. Leave empty if not a tiered hospitality project.",\n'
+            '"key_requirements": "the actual client requirements and deliverables from the brief — '
+            'NOT internal notes or 20.20 opinions. Verbatim or near-verbatim where possible.",\n'
             '"key_constraints": "fixed elements, things not to change, operational constraints",\n'
             '"client_dislikes": "anything client has said they do not want",\n'
-            '"design_approach": "any specific approach the brief requests e.g. lead concept space model",\n'
-            '"scope_summary": "2-3 sentences describing the full scope precisely as stated"\n'
+            '"design_approach": "any specific approach the brief requests",\n'
+
+            # ── GRAPHICS/BRAND SPECIFIC ─────────────────────────────────────
+            '"deliverable_types": "list the actual deliverable types mentioned — e.g. gift card design, '
+            'brand guidelines, print artwork, wayfinding drawings, CGI renders, signage package. '
+            'Leave empty if not determinable.",\n'
+            '"print_required": "yes | no | unknown — whether print-ready or CMYK artwork is needed",\n'
+            '"brand_guidelines_exist": "yes | no | unknown — whether the client has existing brand '
+            'guidelines 20.20 must work within",\n'
+
+            # ── INTERNAL NOTES DETECTION ────────────────────────────────────
+            '"contains_internal_notes": "yes | no — yes if the brief contains meeting notes, '
+            'internal opinions, competitor intelligence, staff observations, or budget context '
+            'that should NOT appear in a client-facing proposal",\n'
+            '"internal_notes_description": "if contains_internal_notes is yes, one sentence '
+            'describing what looks internal — e.g. Notes include staff departure details and '
+            'internal budget observations. Leave empty string if no internal notes detected.",\n'
+
+            # ── TRIAGE CONTROL FIELDS ───────────────────────────────────────
+            '"scope_plain": "one plain-English sentence describing what work is in scope — '
+            'written as a user would understand it, not in design jargon. E.g. Full four-phase '
+            'hospitality design for the VVIP lounge at the Amex Stadium. Or: Brand strategy and '
+            'identity development for Payne and Gunter across London event venues. Or: Design of '
+            'two gift cards and sleeves for Costa Coffee thank you and birthday occasions.",\n'
+            '"brief_summary": "one plain-English sentence the triage screen shows at the top — '
+            'what the model understood at a glance. E.g. This looks like a four-phase hospitality '
+            'proposal for Brighton and Hove Albion FC at the Amex Stadium. Or: This looks like a '
+            'brand strategy project for Payne and Gunter — please confirm the project type before '
+            'generating. Make the sentence more cautious if any confidence is medium or low.",\n'
+            '"proceed_direct": "true | false — true only if project_type_confidence, '
+            'client_confidence are BOTH high AND contains_internal_notes is no. '
+            'false if ANY critical field is medium or low confidence, or internal notes detected. '
+            'When false, the triage screen will show questions before generating."\n'
             '}'
         )
 
@@ -1077,6 +1309,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
             'lead_architect':        ex.get('lead_architect', ''),
             'project_manager':       ex.get('project_manager', ''),
             'brief_type':            ex.get('brief_type', ''),
+            'brief_source':          ex.get('brief_source', ''),
             'continuation':          ex.get('continuation', 'no'),
             'prior_stages_completed':ex.get('prior_stages_completed', ''),
             'riba_stages':           ex.get('riba_stages', ''),
@@ -1084,12 +1317,26 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
             'stage_3_duration':      ex.get('stage_3_duration', ''),
             'budget':                ex.get('budget_stated', ''),
             'tier_summary':          ex.get('tier_summary', ''),
-            'scope':                 ex.get('scope_summary', ''),
+            'scope':                 ex.get('scope_summary', ex.get('scope_plain', '')),
+            'scope_plain':           ex.get('scope_plain', ''),
             'key_requirements':      ex.get('key_requirements', ''),
             'key_constraints':       ex.get('key_constraints', ''),
             'key_preferences':       ex.get('key_preferences', ex.get('key_requirements', '')),
             'client_dislikes':       ex.get('client_dislikes', ''),
             'design_approach':       ex.get('design_approach', ''),
+            # ── New triage fields ───────────────────────────────────────────
+            'project_type':          ex.get('project_type', ''),
+            'project_type_confidence': ex.get('project_type_confidence', 'high'),
+            'project_type_question': ex.get('project_type_question', ''),
+            'client_confidence':     ex.get('client_confidence', 'high'),
+            'client_question':       ex.get('client_question', ''),
+            'contains_internal_notes': ex.get('contains_internal_notes', 'no'),
+            'internal_notes_description': ex.get('internal_notes_description', ''),
+            'deliverable_types':     ex.get('deliverable_types', ''),
+            'print_required':        ex.get('print_required', 'unknown'),
+            'brand_guidelines_exist':ex.get('brand_guidelines_exist', 'unknown'),
+            'brief_summary':         ex.get('brief_summary', ''),
+            'proceed_direct':        str(ex.get('proceed_direct', 'true')).lower() == 'true',
             'date':                  time.strftime('%-d %B %Y'),
         }
 
@@ -1286,20 +1533,51 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
                 raise FileNotFoundError('PowerPoint was not created')
             update_job(job_id, pptx_path=pptx_path, status='done')
             progress('Done — click Download PowerPoint or Word Doc', 100)
+            log_usage_event(
+                job_id, 'completed',
+                client=meta.get('client', ''), venue=meta.get('venue', ''),
+                brief_type=meta.get('brief_type', ''), is_riba=meta.get('is_riba', ''),
+                pptx_ready=True,
+                duration_seconds=round(time.time() - pipeline_start_ts, 1),
+                num_supporting_docs=len(supporting_docs_b64),
+            )
         except Exception as pptx_err:
             import traceback
             err_detail = traceback.format_exc()
             update_job(job_id, status='done', pptx_error=str(pptx_err), pptx_traceback=err_detail[-500:])
             progress(f'Sections complete. PowerPoint failed: {pptx_err}', 100)
+            log_usage_event(
+                job_id, 'pptx_failed',
+                client=meta.get('client', ''), venue=meta.get('venue', ''),
+                brief_type=meta.get('brief_type', ''), is_riba=meta.get('is_riba', ''),
+                pptx_ready=False, error=str(pptx_err)[:200],
+                duration_seconds=round(time.time() - pipeline_start_ts, 1),
+                num_supporting_docs=len(supporting_docs_b64),
+            )
 
     except Exception as e:
         import traceback
         # Even on pipeline error, mark done if we have sections
         job = load_job(job_id) or {}
+        meta_for_log = job.get('meta', {})
         if job.get('sections'):
             update_job(job_id, status='done', error=str(e))
+            log_usage_event(
+                job_id, 'completed_with_error',
+                client=meta_for_log.get('client', ''), venue=meta_for_log.get('venue', ''),
+                error=str(e)[:200],
+                duration_seconds=round(time.time() - pipeline_start_ts, 1),
+                num_supporting_docs=len(supporting_docs_b64),
+            )
         else:
             update_job(job_id, status='error', error=str(e))
+            log_usage_event(
+                job_id, 'failed',
+                client=meta_for_log.get('client', ''), venue=meta_for_log.get('venue', ''),
+                error=str(e)[:200],
+                duration_seconds=round(time.time() - pipeline_start_ts, 1),
+                num_supporting_docs=len(supporting_docs_b64),
+            )
         progress(f'Error: {e}', None)
 
 
@@ -2045,7 +2323,99 @@ def health():
         'jobs_dir_exists': os.path.exists(JOBS_DIR),
     })
 
-@app.route('/')
+@app.route('/usage')
+def usage_dashboard():
+    """Internal usage dashboard — shows every generation attempt logged via
+    log_usage_event(). Protected by USAGE_DASHBOARD_KEY (set in Railway's
+    environment variables); without it set, this route refuses all access.
+    Visit /usage?key=YOUR_KEY to view. Visit /usage?key=YOUR_KEY&migrate=1
+    once to backfill from any job files still on disk (best-effort — see
+    migrate_existing_jobs_to_usage_log for why this can't recover jobs from
+    before the last server restart)."""
+    if not USAGE_DASHBOARD_KEY:
+        return 'Usage dashboard is disabled — set USAGE_DASHBOARD_KEY in Railway environment variables to enable it.', 403
+    if request.args.get('key') != USAGE_DASHBOARD_KEY:
+        return 'Forbidden — missing or incorrect key.', 403
+
+    migration_summary = None
+    if request.args.get('migrate'):
+        migration_summary = migrate_existing_jobs_to_usage_log()
+
+    events = read_usage_log()
+    events.sort(key=lambda e: e.get('ts', 0), reverse=True)
+
+    total_started = sum(1 for e in events if e.get('event') == 'started')
+    total_completed = sum(1 for e in events if e.get('event') in ('completed', 'completed_with_error'))
+    total_failed = sum(1 for e in events if e.get('event') in ('failed', 'pptx_failed'))
+    docs_used = sum(1 for e in events if e.get('event') == 'started' and e.get('num_supporting_docs', 0) > 0)
+
+    def esc(s):
+        return str(s).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+    rows_html = []
+    for e in events:
+        event = e.get('event', '')
+        colour = {'completed': '#3B6D11', 'started': '#666', 'failed': '#A32D2D',
+                  'pptx_failed': '#A32D2D', 'completed_with_error': '#C9A84C'}.get(event, '#666')
+        rows_html.append(f"""
+            <tr>
+              <td>{esc(e.get('date',''))}</td>
+              <td><span style="color:{colour};font-weight:600">{esc(event)}</span></td>
+              <td>{esc(e.get('client',''))}</td>
+              <td>{esc(e.get('venue',''))}</td>
+              <td>{esc(e.get('brief_type',''))}</td>
+              <td>{esc(e.get('duration_seconds','')) }{'s' if e.get('duration_seconds') else ''}</td>
+              <td>{esc(e.get('num_supporting_docs',''))}</td>
+              <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;color:#A32D2D">{esc(e.get('error',''))}</td>
+              <td style="color:#999;font-size:11px">{esc(e.get('job_id',''))}</td>
+            </tr>""")
+
+    migration_html = ''
+    if migration_summary is not None:
+        migration_html = (
+            f'<div style="background:#EAF3DE;border:1px solid #B7D89A;border-radius:6px;'
+            f'padding:10px 14px;margin-bottom:1rem;font-size:13px">'
+            f'Migration ran: found {migration_summary["found"]} job file(s) on disk, '
+            f'added {migration_summary["migrated"]} new event(s), '
+            f'skipped {migration_summary["skipped"]} (already logged or unreadable). '
+            f'Note: this can only recover jobs that survived up to the most recent server restart — '
+            f'JOBS_DIR is ephemeral storage on Railway and is wiped on every redeploy.'
+            f'</div>'
+        )
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Usage — 20.20 Proposal Generator</title>
+<style>
+body{{font-family:-apple-system,Arial,sans-serif;background:#F5F4F1;margin:0;padding:2rem;color:#1A1A1A}}
+h1{{font-size:20px;margin-bottom:.25rem}}
+.sub{{color:#666;font-size:13px;margin-bottom:1.5rem}}
+.stats{{display:flex;gap:1rem;margin-bottom:1.5rem;flex-wrap:wrap}}
+.stat{{background:#fff;border:1px solid #E0DED8;border-radius:8px;padding:.75rem 1.25rem;min-width:120px}}
+.stat .n{{font-size:24px;font-weight:700;color:#1B2340}}
+.stat .l{{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#666}}
+table{{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;font-size:13px}}
+th{{background:#1B2340;color:#fff;text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.04em}}
+td{{padding:7px 10px;border-bottom:1px solid #EEE}}
+tr:hover{{background:#FAFAF8}}
+a{{color:#1B2340}}
+</style></head>
+<body>
+  <h1>Proposal generator — usage log</h1>
+  <div class="sub">{len(events)} total events logged. <a href="?key={esc(USAGE_DASHBOARD_KEY)}&migrate=1">Run migration from existing job files</a></div>
+  {migration_html}
+  <div class="stats">
+    <div class="stat"><div class="n">{total_started}</div><div class="l">Generations started</div></div>
+    <div class="stat"><div class="n">{total_completed}</div><div class="l">Completed</div></div>
+    <div class="stat"><div class="n">{total_failed}</div><div class="l">Failed</div></div>
+    <div class="stat"><div class="n">{docs_used}</div><div class="l">Used supporting docs</div></div>
+  </div>
+  <table>
+    <tr><th>Date</th><th>Event</th><th>Client</th><th>Venue</th><th>Brief type</th><th>Duration</th><th>Supp. docs</th><th>Error</th><th>Job ID</th></tr>
+    {''.join(rows_html) if rows_html else '<tr><td colspan="9" style="text-align:center;color:#999;padding:2rem">No usage logged yet.</td></tr>'}
+  </table>
+</body></html>"""
+    return html
+
 def index():
     return INDEX_HTML
 

@@ -2419,6 +2419,10 @@ a{{color:#1B2340}}
 def index():
     return INDEX_HTML
 
+@app.route('/')
+def index():
+    return INDEX_HTML
+
 @app.route('/submit', methods=['POST'])
 def submit():
     if not ANTHROPIC_KEY:

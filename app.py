@@ -2805,6 +2805,36 @@ def confirm(job_id):
     t.start()
     return jsonify({'ok': True})
 
+@app.route('/jobs')
+def list_jobs():
+    """Diagnostic — lists all current jobs in JOBS_DIR with their status
+    and last progress message. Key-protected with USAGE_DASHBOARD_KEY."""
+    if not USAGE_DASHBOARD_KEY or request.args.get('key') != USAGE_DASHBOARD_KEY:
+        return 'Forbidden', 403
+    jobs = []
+    if os.path.isdir(JOBS_DIR):
+        for fname in sorted(os.listdir(JOBS_DIR), reverse=True):
+            if not fname.endswith('.json') or fname.startswith('_'):
+                continue
+            job = load_job(fname[:-5])
+            if not job:
+                continue
+            meta = job.get('meta', {})
+            prog = job.get('progress', [])
+            last_msg = prog[-1].get('msg','') if prog else ''
+            jobs.append({
+                'job_id':   fname[:-5],
+                'status':   job.get('status'),
+                'client':   meta.get('client',''),
+                'venue':    meta.get('venue',''),
+                'last_msg': last_msg,
+                'error':    job.get('error',''),
+                'proceed_direct': meta.get('proceed_direct'),
+                'project_type':   meta.get('project_type',''),
+                'project_type_confidence': meta.get('project_type_confidence',''),
+            })
+    return jsonify({'jobs_dir': JOBS_DIR, 'count': len(jobs), 'jobs': jobs})
+
 @app.route('/debug/<job_id>')
 def debug(job_id):
     """Shows full job state for troubleshooting."""

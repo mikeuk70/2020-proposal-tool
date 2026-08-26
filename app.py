@@ -6,7 +6,6 @@ Hosted Flask app for LawLiss / 20.20
 import os, json, uuid, threading, queue, time, base64, re, copy, zipfile, tempfile, shutil
 import anthropic
 from flask import Flask, request, jsonify, send_file, Response
-from werkzeug.exceptions import RequestEntityTooLarge
 from pptx_builder import build_pptx_clean
 def build_docx(sections, meta):
     """Build a clean Word document from generated sections for team review and sharing."""
@@ -24,24 +23,6 @@ def build_docx(sections, meta):
         s = doc.styles[lvl]
         s.font.name = 'Arial'; s.font.size = Pt(sz); s.font.bold = True
         s.font.color.rgb = RGBColor(0x11, 0x14, 0x18)
-
-    # Collects every [CONFIRM WITH CLIENT: ...] note found while building
-    # this doc, grouped by section heading, so they can be moved to a
-    # dedicated internal action page at the end instead of appearing inline
-    # in client-facing text. Mirrors the same behaviour in pptx_builder.py —
-    # this export path needs its own copy since it has its own text-cleaning
-    # function rather than sharing pptx_builder's.
-    confirm_notes = []
-    _confirm_re = re.compile(r'\[CONFIRM WITH CLIENT:\s*([^\]]+)\]', re.IGNORECASE)
-
-    def _strip_confirm_notes(text, label):
-        if not text:
-            return text
-        for m in _confirm_re.finditer(text):
-            note = m.group(1).strip()
-            if note:
-                confirm_notes.append((label, note))
-        return _confirm_re.sub('', text)
 
     def _c(t):
         if not t: return ''
@@ -90,38 +71,9 @@ def build_docx(sections, meta):
         body = sec.get('body','')
         if not body.strip(): continue
         heading = sec.get('heading', sec.get('id','').replace('_',' ').title())
-        body = _strip_confirm_notes(body, heading)
         doc.add_heading(heading, level=1)
         add_body(body)
         doc.add_paragraph()
-
-    if confirm_notes:
-        doc.add_page_break()
-        h = doc.add_heading('Internal use only — points to confirm before sending', level=1)
-        for run in h.runs:
-            run.font.color.rgb = RGBColor(0xA3, 0x2D, 0x2D)
-        note_p = doc.add_paragraph()
-        note_r = note_p.add_run(
-            'Assumptions and gaps flagged while drafting. Resolve these with the client '
-            'or remove this page before the proposal goes out.'
-        )
-        note_r.font.italic = True
-        note_r.font.size = Pt(10)
-        note_r.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
-
-        seen_labels = []
-        by_label = {}
-        for label, note in confirm_notes:
-            if label not in by_label:
-                by_label[label] = []
-                seen_labels.append(label)
-            by_label[label].append(note)
-        for label in seen_labels:
-            doc.add_heading(label, level=2)
-            for note in by_label[label]:
-                p = doc.add_paragraph(style='List Bullet')
-                p.paragraph_format.left_indent = Cm(0.5)
-                run = p.add_run(note); run.font.name = 'Arial'; run.font.size = Pt(11)
 
     tmp = tempfile.mkdtemp(prefix='2020_docx_')
     slug = re.sub(r'[^a-zA-Z0-9]+', '_', meta.get('venue','Proposal'))
@@ -132,14 +84,10 @@ def build_docx(sections, meta):
 
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 40 * 1024 * 1024  # 40MB max upload — main brief + up to 3 supporting PDFs. Note: this caps request SIZE in bytes, not tokens — the rate limit that actually bites on complex briefs is Anthropic's per-minute token limit, not file size.
+app.config['MAX_CONTENT_LENGTH'] = 20 * 1024 * 1024  # 20MB max upload
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
-# Shared secret for the /usage dashboard — set USAGE_DASHBOARD_KEY in
-# Railway's environment variables. Without it, /usage refuses all access
-# rather than defaulting to open, since the dashboard shows client names.
-USAGE_DASHBOARD_KEY = os.environ.get('USAGE_DASHBOARD_KEY', '')
 # Find template file - check several locations
 _here = os.path.dirname(os.path.abspath(__file__))
 _candidates = [
@@ -195,95 +143,6 @@ def append_section(job_id, section):
     secs.append(section)
     job['sections'] = secs
     save_job(job_id, job)
-
-
-# ── USAGE LOG ─────────────────────────────────────────────────────────────────
-# Tracks every generation attempt so usage can be reviewed later (client,
-# venue, brief type, outcome, duration). Append-only JSONL — one JSON object
-# per line — so a single corrupted line never breaks the whole file, and
-# writes never need to read the existing file first.
-#
-# IMPORTANT — persistence: JOBS_DIR lives under tempfile.gettempdir(), which
-# on Railway is ephemeral storage wiped on every redeploy/restart. This log
-# file lives in the same place and has the same limitation. It is NOT a
-# substitute for a real database if usage data needs to survive redeploys
-# long-term — treat this as a working solution to get visibility now, and
-# revisit storage (e.g. a Railway volume, or writing to an external sheet/DB)
-# if this data needs to be durable indefinitely.
-USAGE_LOG_PATH = os.path.join(JOBS_DIR, '_usage_log.jsonl')
-
-def log_usage_event(job_id, event, **fields):
-    """Append one usage event. event is a short string like 'started',
-    'completed', 'failed'. Extra fields (client, venue, brief_type, etc.)
-    are merged in. Never raises — a logging failure should never break
-    the actual proposal generation."""
-    try:
-        entry = {
-            'ts': time.time(),
-            'date': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'job_id': job_id,
-            'event': event,
-        }
-        entry.update(fields)
-        with open(USAGE_LOG_PATH, 'a') as f:
-            f.write(json.dumps(entry) + '\n')
-    except Exception:
-        pass
-
-def read_usage_log():
-    """Read all usage events, oldest first. Skips any corrupted lines
-    rather than failing the whole read."""
-    events = []
-    if not os.path.exists(USAGE_LOG_PATH):
-        return events
-    with open(USAGE_LOG_PATH, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                events.append(json.loads(line))
-            except Exception:
-                continue
-    return events
-
-def migrate_existing_jobs_to_usage_log():
-    """Best-effort backfill: scan whatever job .json files currently exist
-    in JOBS_DIR and add a 'completed'/'failed' usage event for any job not
-    already represented in the usage log. Only catches jobs that survived
-    up to the most recent server restart — JOBS_DIR is ephemeral, so this
-    cannot recover jobs from before a redeploy that already happened.
-    Returns a summary dict so the caller can report exactly what happened."""
-    existing_job_ids = {e.get('job_id') for e in read_usage_log()}
-    found, migrated, skipped = 0, 0, 0
-    if not os.path.isdir(JOBS_DIR):
-        return {'found': 0, 'migrated': 0, 'skipped': 0}
-    for fname in os.listdir(JOBS_DIR):
-        if not fname.endswith('.json') or fname.startswith('_'):
-            continue
-        job_id = fname[:-5]
-        found += 1
-        if job_id in existing_job_ids:
-            skipped += 1
-            continue
-        job = load_job(job_id)
-        if not job:
-            skipped += 1
-            continue
-        meta = job.get('meta', {})
-        status = job.get('status', 'unknown')
-        log_usage_event(
-            job_id, 'completed' if status == 'done' else status,
-            client=meta.get('client', ''),
-            venue=meta.get('venue', ''),
-            brief_type=meta.get('brief_type', ''),
-            is_riba=meta.get('is_riba', ''),
-            error=job.get('error', ''),
-            pptx_ready=bool(job.get('pptx_path') and os.path.exists(job.get('pptx_path', ''))),
-            migrated_from_job_file=True,
-        )
-        migrated += 1
-    return {'found': found, 'migrated': migrated, 'skipped': skipped}
 
 
 # ── NAMESPACES ────────────────────────────────────────────────────────────────
@@ -849,15 +708,13 @@ Objective:
 [1-2 sentences on what this stage achieves for THIS project — reference the specific venue, spaces or tiers]
 
 Process:
-[4-6 bullet points — how we work through this stage. Reference the specific spaces, tiers and design team context where relevant. If the project has multiple spaces or sub-stages (e.g. 3.1, 3.2, 3.3), summarise the sequence and grouping logic here in a few bullets — do not give each sub-stage its own bullet if that means Deliverables ends up empty.]
+[4-6 bullet points — how we work through this stage. Reference the specific spaces, tiers and design team context where relevant. Include sub-stages if the RIBA stages have sub-divisions e.g. 2.1, 2.2, 2.3]
 
 Deliverables:
-[6-10 bullet points — specific outputs, covering ALL spaces and sub-stages named in this stage, not just the ones mentioned in Process. If there are named spaces, reference them. If there is a per-tier delivery model, reflect it. Include the number of CGI renders if concept stage]
+[6-10 bullet points — specific outputs. If there are named spaces, reference them. If there is a per-tier delivery model, reflect it. Include the number of CGI renders if concept stage]
 
 Meetings & Presentations:
 [3-5 bullet points — specific meetings with the design team, architect and client. Reference Teams or in-person based on what the brief says]
-
-CRITICAL — sub-stages and multi-space projects: when a stage covers multiple spaces or numbered sub-stages (e.g. Stage 3.1 through 3.6 across different lounges), do NOT spread the sub-stage walkthrough across Objective, Process and Deliverables as if each column holds a different slice of the sequence. Each of Objective, Process, Deliverables and Meetings must independently cover the FULL stage, every space and every sub-stage, just from that column's own angle (what it achieves / how we do it / what we produce / who we meet). A reader looking at only the Deliverables column should see outputs for every single space in this stage, not just some of them.
 
 Quality requirements — these are mandatory:
 
@@ -941,14 +798,11 @@ Flag anything that needs confirming with: [CONFIRM WITH CLIENT: what needs clari
     ('stage3',  'Stage 3 — Design development',
      STAGE_PROMPT.format(stage_name='Stage 3 — Design development (RIBA Stage 2, 2 weeks). Include concept freeze milestone in Deliverables', ctx='{ctx}')),
     ('stage456','Stage 4 onwards',
-     STAGE_PROMPT.format(stage_name='The final stage(s) of the project covering technical production, coordination and handover. For RIBA-staged projects call this "Stages 4, 5 and 6" and use sub-headings Stage 4 / Stage 5 / Stage 6. For phase-based or arena projects call this "Phase 4 — Production and delivery" and describe it as a single phase. Match the naming convention used in the earlier stage sections. IMPORTANT: this section covers multiple sub-stages in one response. Every sub-stage MUST have its own populated Deliverables list — do not let Objective and Process content crowd out Deliverables. If space is tight, keep Process bullets shorter rather than dropping Deliverables content.', ctx='{ctx}')),
+     STAGE_PROMPT.format(stage_name='The final stage(s) of the project covering technical production, coordination and handover. For RIBA-staged projects call this "Stages 4, 5 and 6" and use sub-headings Stage 4 / Stage 5 / Stage 6. For phase-based or arena projects call this "Phase 4 — Production and delivery" and describe it as a single phase. Match the naming convention used in the earlier stage sections.', ctx='{ctx}')),
     ('fees',    'Fees and timings',
      'Write the fees section. List each stage with [FEE: TBC] for all figures. Note timings per stage. Fees are exclusive of VAT, 3rd party costs, general expenses and travel. Subject to contract.\n\n{ctx}'),
     ('nextsteps','Next steps',
-     'Write next steps as four numbered actions: review, feedback, site visit, appointment. '
-     'Format each one as a short title followed by a colon, then a 1-2 sentence description, '
-     'for example: "Review this proposal: Share it with your team and flag any questions before we proceed." '
-     'Keep the title under 5 words. Direct and confident. No client name.\n\n{ctx}'),
+     'Write next steps as four numbered actions: review, feedback, site visit, appointment. Direct and confident. 1-2 sentences each. No client name.\n\n{ctx}'),
 ]
 
 def build_context(meta, spaces_text=''):
@@ -957,7 +811,6 @@ def build_context(meta, spaces_text=''):
     continuation = meta.get('continuation','no')
     prior = meta.get('prior_stages_completed','')
     second = meta.get('second_contact','')
-    project_type = meta.get('project_type', '')
 
     # Stage context line
     if riba:
@@ -974,55 +827,32 @@ def build_context(meta, spaces_text=''):
     is_riba_flag = meta.get('is_riba','yes').lower()
     ctx = f"PROJECT: {meta.get('venue','')}\n"
 
-    # Project type — the primary signal for template and terminology selection.
-    # Written explicitly so every section prompt knows what kind of proposal this is.
+    # Project type — drives terminology, deliverable types, and stage structure
     pt_labels = {
-        'hospitality':       'HOSPITALITY / INTERIOR DESIGN — use spatial language, guest journey, tiers, hospitality pyramid',
-        'graphics_brand':    'GRAPHICS AND BRAND — use graphic design language. No CGI, no spatial plans, no RIBA stages. Deliverables are artwork files, guidelines, print-ready assets.',
-        'strategy_brand':    'BRAND STRATEGY — use strategy and brand language. Deliverables are frameworks, guidelines, workshop outputs. No physical design deliverables.',
-        'tender_itt':        'FORMAL TENDER / ITT RESPONSE — formal tone, respond to stated selection criteria, include assumptions and exclusions, structure around the client\'s evaluation framework.',
-        'cruise_fitout':     'CRUISE / FIT-OUT — structure around shipyard phase gates and information release schedule. No hospitality pyramid. Deliverables are technical drawings and specifications.',
-        'catering_operations': 'CATERING / OPERATIONS — NOTE: this does not appear to be a design brief. Confirm the actual scope before generating.',
-        'unknown':           'PROJECT TYPE UNCLEAR — write with caution, flag assumptions.',
+        'hospitality':      'HOSPITALITY / INTERIOR DESIGN — use spatial language, guest journey, hospitality tiers, CGI renders',
+        'graphics_brand':   'GRAPHICS AND BRAND — use graphic design language. No CGI, no spatial plans, no RIBA stages. Deliverables are artwork files, guidelines, print-ready assets.',
+        'strategy_brand':   'BRAND STRATEGY — strategic frameworks, workshop outputs, positioning. No physical design deliverables.',
+        'tender_itt':       'FORMAL TENDER / ITT RESPONSE — formal tone, respond to selection criteria, include assumptions and exclusions.',
+        'cruise_fitout':    'CRUISE / FIT-OUT — shipyard phase gate language, technical specs, information release schedule.',
+        'unknown':          'PROJECT TYPE UNCLEAR — write conservatively and flag assumptions.',
     }
-    pt_label = pt_labels.get(project_type, f'PROJECT TYPE: {project_type or "not determined"}')
-    ctx += f"PROJECT TYPE: {pt_label}\n"
-
-    ctx += f"RIBA STAGED PROJECT: {'YES — respond using RIBA stage structure and terminology' if is_riba_flag == 'yes' else 'NO — this is a phase-based or single-scope project, do not use RIBA stage references'}\n"
+    pt = meta.get('project_type', '')
+    ctx += f"PROJECT TYPE: {pt_labels.get(pt, pt or 'not determined')}\n"
+    ctx += f"RIBA STAGED PROJECT: {'YES — respond using RIBA stage structure and terminology' if is_riba_flag == 'yes' else 'NO — phase-based or single-scope project, do not use RIBA stage references'}\n"
     ctx += f"CLIENT: {meta.get('client','')}\n"
     ctx += f"CONTACT: {contact_line}\n"
     if meta.get('lead_architect'): ctx += f"LEAD ARCHITECT/DESIGN TEAM: {meta['lead_architect']}\n"
     if meta.get('project_manager'): ctx += f"PROJECT MANAGER: {meta['project_manager']}\n"
     ctx += f"BRIEF TYPE: {bt}\n"
-    ctx += f"BRIEF SOURCE: {meta.get('brief_source','')}\n"
     ctx += f"CONTINUATION OF PRIOR WORK: {continuation.upper()}\n"
     if prior: ctx += f"PRIOR STAGES / CONTEXT: {prior}\n"
     ctx += f"{stage_ctx}\n"
     ctx += f"BUDGET: {meta.get('budget','Not stated')}\n"
     if meta.get('tier_summary'): ctx += f"HOSPITALITY TIERS: {meta['tier_summary']}\n"
 
-    # Graphics/brand specific context
-    if meta.get('deliverable_types'):
-        ctx += f"DELIVERABLES EXPECTED: {meta['deliverable_types']}\n"
-    if meta.get('print_required') == 'yes':
-        ctx += "PRINT REQUIRED: Yes — include CMYK, print-ready artwork, file format specs in deliverables.\n"
-    if meta.get('brand_guidelines_exist') == 'yes':
-        ctx += "EXISTING BRAND GUIDELINES: Yes — design must work within confirmed brand guidelines, not develop new ones from scratch.\n"
-    elif meta.get('brand_guidelines_exist') == 'no':
-        ctx += "EXISTING BRAND GUIDELINES: No — brand language and visual system to be developed as part of this project.\n"
-
-    # Internal notes warning — so the model doesn't repeat internal content in the proposal
-    if meta.get('contains_internal_notes') == 'yes':
-        ctx += (f"\nINTERNAL NOTES DETECTED: The brief appears to contain internal observations "
-                f"that should NOT appear in the client-facing proposal. "
-                f"{meta.get('internal_notes_description','')} "
-                f"Focus only on the actual client requirements and project scope.\n")
-
     # Spaces
     if spaces_text:
         ctx += f"SPACES:\n{spaces_text}\n"
-    elif meta.get('scope_plain'):
-        ctx += f"SCOPE: {meta['scope_plain']}\n"
     elif meta.get('scope'):
         ctx += f"SCOPE: {meta['scope']}\n"
 
@@ -1035,59 +865,20 @@ def build_context(meta, spaces_text=''):
         ctx += f"\nCLIENT DISLIKES/AVOIDED APPROACHES:\n{meta['client_dislikes']}\n"
     if meta.get('design_approach'):
         ctx += f"\nSPECIFIC DESIGN APPROACH REQUESTED:\n{meta['design_approach']}\n"
+    if meta.get('deliverable_types'):
+        ctx += f"\nDELIVERABLES EXPECTED: {meta['deliverable_types']}\n"
+    if meta.get('print_required') == 'yes':
+        ctx += "PRINT REQUIRED: Yes — include CMYK, print-ready artwork, file format specs in deliverables.\n"
+    if meta.get('brand_guidelines_exist') == 'yes':
+        ctx += "EXISTING BRAND GUIDELINES: Yes — design must work within confirmed brand guidelines.\n"
+    if meta.get('contains_internal_notes') == 'yes':
+        ctx += (f"\nINTERNAL NOTES DETECTED: The brief contains internal observations that should NOT "
+                f"appear in the client-facing proposal. {meta.get('internal_notes_description','')} "
+                f"Focus only on actual client requirements and project scope.\n")
     if meta.get('supporting_context'):
-        ctx += f"\nADDITIONAL CONTEXT FROM SUPPORTING DOCUMENTS (the primary brief above always takes priority if anything conflicts):\n{meta['supporting_context']}\n"
+        ctx += f"\nADDITIONAL CONTEXT FROM SUPPORTING DOCUMENTS:\n{meta['supporting_context']}\n"
 
     return ctx.strip()
-
-
-def repair_json(raw_str):
-    """Try progressively more aggressive repairs on near-valid JSON from the model.
-    Handles the most common failure: unescaped quotes/apostrophes inside string
-    values (club names, quoted brief language), which break json.loads with
-    'Expecting , delimiter' type errors."""
-    # Attempt 1: as-is
-    try:
-        return json.loads(raw_str)
-    except json.JSONDecodeError:
-        pass
-
-    # Attempt 2: escape stray backslashes that aren't valid escape sequences
-    try:
-        fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw_str)
-        return json.loads(fixed)
-    except json.JSONDecodeError:
-        pass
-
-    # Attempt 3: fix smart quotes / curly apostrophes inside values, which
-    # sometimes appear when the model echoes brief text verbatim
-    try:
-        fixed = raw_str.replace('\u2018', "'").replace('\u2019', "'")
-        fixed = fixed.replace('\u201c', '"').replace('\u201d', '"')
-        return json.loads(fixed)
-    except json.JSONDecodeError:
-        pass
-
-    # Attempt 4: line-by-line repair — find the specific line/column json
-    # reports and escape an unescaped " or ' that isn't a field delimiter.
-    try:
-        fixed = raw_str
-        for _ in range(8):  # cap repair attempts to avoid infinite loop
-            try:
-                return json.loads(fixed)
-            except json.JSONDecodeError as e:
-                idx = e.pos
-                # If the character at the error position is an unescaped quote
-                # inside what looks like a string value, escape it and retry.
-                if idx < len(fixed) and fixed[idx] == '"':
-                    fixed = fixed[:idx] + '\\"' + fixed[idx+1:]
-                else:
-                    raise
-        return json.loads(fixed)
-    except json.JSONDecodeError:
-        pass
-
-    return None
 
 
 def strip_html(txt):
@@ -1099,103 +890,26 @@ def strip_html(txt):
     clean = clean.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&nbsp;', ' ')
     return ' '.join(clean.split())
 
-def run_extraction(job_id, pdf_b64=None, brief_text=None, prior_work='', supporting_docs_b64=None):
-    """Thread 1: read the brief, extract structured data, then pause for
-    triage confirmation before generation starts. Sets status to
-    'awaiting_confirmation' when done so the frontend shows Screen A."""
+def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
+    """Background thread: extract → research → generate → build PPTX."""
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    supporting_docs_b64 = supporting_docs_b64 or []
-    pipeline_start_ts = time.time()
-
-    log_usage_event(
-        job_id, 'started',
-        input_type='pdf' if pdf_b64 else 'text',
-        num_supporting_docs=supporting_docs_count,
-        has_prior_work=bool(prior_work),
-    )
 
     def progress(msg, pct=None):
         append_progress(job_id, msg, pct)
 
     try:
-        # ── STEP 1: EXTRACT MAIN BRIEF ───────────────────────────────────────
-        # Supporting docs are deliberately NOT stacked into this call. Each
-        # extra PDF in the same request multiplies the input tokens for that
-        # single call, and on lower usage tiers (30k input tokens/minute is
-        # the default tier) a brief plus 2-3 supporting PDFs can blow past
-        # the limit in one shot, where retrying just fails again at the same
-        # size. Instead: extract the main brief alone (small, fast, well
-        # within limits), then summarize each supporting doc in its OWN
-        # separate, smaller call below, spacing token usage out over time
-        # rather than concentrating it in one request.
+        # ── STEP 1: EXTRACT ─────────────────────────────────────────────────
         progress('Reading the brief...', 5)
         extract_prompt = (
-            'Read this client brief, ITT, scope document, or meeting notes carefully. '
-            'Extract ALL available information. Return ONLY valid JSON with NO markdown or explanation.\n'
-            'CRITICAL: every string value must be valid JSON. Escape all double quotes as \\" and avoid '
-            'using straight or curly apostrophes inside values where possible. Do not include literal '
-            'line breaks inside a string value — use a single space instead.\n\n'
-
-            'STEP 1 — DETERMINE PROJECT TYPE FIRST. This is the most important decision. '
-            'Look for these vocabulary signals before reading anything else:\n'
-            '  HOSPITALITY/INTERIOR: lounge, bar, restaurant, concourse, tier, hospitality, RIBA stage, '
-            'CGI, spatial, interior design, FF&E, furniture, materials, guest journey, seating bowl\n'
-            '  GRAPHICS/BRAND: gift card, packaging, sleeve, artwork, print, CMYK, brand identity, '
-            'tone of voice, guidelines, logo, visual system, typographic, colour palette, brand strategy, '
-            'positioning, propositions, concept routes, templates, signage design, wayfinding\n'
-            '  STRATEGY/BRAND ONLY (no physical deliverables): workshop, archetypes, key messages, '
-            'competitive intelligence, market positioning — with NO spatial or print deliverables mentioned\n'
-            '  TENDER/ITT: ITT, ITN, RFP, tender submission, selection criteria, evaluation criteria, '
-            'Form of Tender, fee return, submission deadline\n'
-            '  CATERING/OPERATIONS (not a design brief): catering contract, menu, kitchen operator, '
-            'F&B provision, catering tender — flag this as catering_operations\n'
-            '  CRUISE/FIT-OUT: shipyard, yard phase, hull number, Engineering Unit, Meyer Werft, '
-            'fit-out, cabin typology, GAP drawing, wayfinding on a vessel\n\n'
-
-            'STEP 2 — ASSESS CONFIDENCE on critical fields. For each, set confidence to:\n'
-            '  high: clear, unambiguous, stated explicitly\n'
-            '  medium: inferable but not explicit, or one strong candidate among minor alternatives\n'
-            '  low: genuinely ambiguous, multiple equally plausible answers, or absent entirely\n\n'
-
-            'STEP 3 — DETECT INTERNAL NOTES. Meeting notes, internal strategy discussions, budget '
-            'observations, staff changes, competitor intelligence, and internal opinions should NOT '
-            'appear in a client-facing proposal. Flag if present.\n\n'
-
+            'Read this client brief, ITT or scope document carefully. Extract ALL available information. Return ONLY valid JSON with NO markdown or explanation.\n'
             '{\n'
-
-            # ── PROJECT TYPE (new unified field) ───────────────────────────
-            '"project_type": "hospitality | graphics_brand | strategy_brand | tender_ itt | '
-            'cruise_fitout | catering_operations | unknown — use the vocabulary signals above. '
-            'hospitality covers all interior design work regardless of project scale. '
-            'graphics_brand covers print, packaging, signage design, environmental graphics, brand identity. '
-            'strategy_brand is brand strategy with no physical deliverables. '
-            'tender_itt is any formal tender or ITT response regardless of discipline. '
-            'catering_operations means this is not a design brief at all.",\n'
-            '"project_type_confidence": "high | medium | low",\n'
-            '"project_type_question": "if confidence is medium or low, write the exact plain-language '
-            'question to show the user — e.g. This could be a hospitality or graphics project — which is '
-            'right? Leave empty string if confidence is high.",\n\n'
-
-            # ── EXISTING FIELDS (kept, not broken) ─────────────────────────
-            '"is_riba": "yes or no. yes = RIBA Plan of Work stages explicitly referenced. '
-            'no = phase-based, single-scope, brand, graphics, or no RIBA stage references.",\n'
-            '"brief_type": "newbuild | refurb | single_space | sponsor | arena | continuation | '
-            'itt | graphics | brand | cruise | unknown",\n'
-            '"brief_source": "Direct approach | Via architect or PM | Formal open tender (ITT) | '
-            'Referral | Repeat client | Unknown",\n'
+            '"is_riba": "yes or no. Determine this first. yes = RIBA Plan of Work with numbered stages, architect-led newbuild or refurbishment. no = single space, sponsor lounge, branding, arena, or no RIBA stage references in the brief",\n'
+            '"brief_type": "newbuild | refurb | single_space | sponsor | arena | continuation | itt",\n'
+            '"brief_source": "Direct approach | Via architect or PM | Formal open tender (ITT) | Referral | Repeat client | Unknown",\n'
             '"continuation": "yes | no",\n'
-
-            # ── CLIENT (with confidence) ────────────────────────────────────
-            '"client": "the name a 20.20 proposal would be addressed to — usually the organisation '
-            'commissioning the work. If meeting notes mention both a venue operator and a tenant or '
-            'sponsor, choose the one doing the commissioning. If both are plausible, set confidence low.",\n'
-            '"client_confidence": "high | medium | low",\n'
-            '"client_question": "if confidence is medium or low, plain-language question — e.g. The '
-            'brief mentions both Mattioli Woods and Leicester Tigers — which should we use as the client '
-            'name? Leave empty string if confidence is high.",\n\n'
-
+            '"client": "",\n'
             '"venue": "",\n'
-            '"primary_contact": "first name only if clear, otherwise full name — used in Dear [Name] greeting",\n'
+            '"primary_contact": "",\n'
             '"contact_role": "",\n'
             '"second_contact": "",\n'
             '"lead_architect": "name of lead architect or design team lead if mentioned",\n'
@@ -1203,51 +917,29 @@ def run_extraction(job_id, pdf_b64=None, brief_text=None, prior_work='', support
             '"proposal_deadline": "",\n'
             '"construction_completion": "",\n'
             '"budget_stated": "",\n'
-            '"riba_stages": "exact RIBA stages requested e.g. Stage 2 and 3 — be precise. '
-            'Leave empty if not a RIBA project.",\n'
+            '"riba_stages": "exact RIBA stages requested e.g. Stage 2 and 3, or 2.1 2.2 2.3 — be precise",\n'
             '"stage_2_duration": "weeks if stated",\n'
             '"stage_3_duration": "weeks if stated",\n'
-            '"prior_stages_completed": "any stages already done e.g. Stage 2 complete",\n'
-            '"spaces": [{"name": "", "tier": "Bronze|Silver|Gold|VVIP|GA|GA+", "level": "", '
-            '"capacity": "", "budget": "", "notes": "specific requirements for this space"}],\n'
-            '"tier_summary": "e.g. Gold 1372 seats, Silver 642. Leave empty if not a tiered hospitality project.",\n'
-            '"key_requirements": "the actual client requirements and deliverables from the brief — '
-            'NOT internal notes or 20.20 opinions. Verbatim or near-verbatim where possible.",\n'
+            '"prior_stages_completed": "any stages already completed e.g. Stage 3 design rejected",\n'
+            '"spaces": [{"name": "", "tier": "Bronze|Silver|Gold|VVIP|GA|GA+", "level": "", "capacity": "", "budget": "", "notes": "specific requirements or constraints for this space"}],\n'
+            '"tier_summary": "e.g. Gold 1372 seats, Silver 642, Bronze 2566",\n'
+            '"key_requirements": "verbatim or near-verbatim key design requirements from the brief",\n'
             '"key_constraints": "fixed elements, things not to change, operational constraints",\n'
             '"client_dislikes": "anything client has said they do not want",\n'
-            '"design_approach": "any specific approach the brief requests",\n'
-
-            # ── GRAPHICS/BRAND SPECIFIC ─────────────────────────────────────
-            '"deliverable_types": "list the actual deliverable types mentioned — e.g. gift card design, '
-            'brand guidelines, print artwork, wayfinding drawings, CGI renders, signage package. '
-            'Leave empty if not determinable.",\n'
-            '"print_required": "yes | no | unknown — whether print-ready or CMYK artwork is needed",\n'
-            '"brand_guidelines_exist": "yes | no | unknown — whether the client has existing brand '
-            'guidelines 20.20 must work within",\n'
-
-            # ── INTERNAL NOTES DETECTION ────────────────────────────────────
-            '"contains_internal_notes": "yes | no — yes if the brief contains meeting notes, '
-            'internal opinions, competitor intelligence, staff observations, or budget context '
-            'that should NOT appear in a client-facing proposal",\n'
-            '"internal_notes_description": "if contains_internal_notes is yes, one sentence '
-            'describing what looks internal — e.g. Notes include staff departure details and '
-            'internal budget observations. Leave empty string if no internal notes detected.",\n'
-
-            # ── TRIAGE CONTROL FIELDS ───────────────────────────────────────
-            '"scope_plain": "one plain-English sentence describing what work is in scope — '
-            'written as a user would understand it, not in design jargon. E.g. Full four-phase '
-            'hospitality design for the VVIP lounge at the Amex Stadium. Or: Brand strategy and '
-            'identity development for Payne and Gunter across London event venues. Or: Design of '
-            'two gift cards and sleeves for Costa Coffee thank you and birthday occasions.",\n'
-            '"brief_summary": "one plain-English sentence the triage screen shows at the top — '
-            'what the model understood at a glance. E.g. This looks like a four-phase hospitality '
-            'proposal for Brighton and Hove Albion FC at the Amex Stadium. Or: This looks like a '
-            'brand strategy project for Payne and Gunter — please confirm the project type before '
-            'generating. Make the sentence more cautious if any confidence is medium or low.",\n'
-            '"proceed_direct": "true | false — true only if project_type_confidence, '
-            'client_confidence are BOTH high AND contains_internal_notes is no. '
-            'false if ANY critical field is medium or low confidence, or internal notes detected. '
-            'When false, the triage screen will show questions before generating."\n'
+            '"design_approach": "any specific approach the brief requests e.g. lead concept space model",\n'
+            '"deliverable_types": "list actual deliverables mentioned e.g. gift card design, brand guidelines, CGI renders",\n'
+            '"print_required": "yes | no | unknown",\n'
+            '"brand_guidelines_exist": "yes | no | unknown",\n'
+            '"contains_internal_notes": "yes | no",\n'
+            '"internal_notes_description": "one sentence describing internal content if present, else empty string",\n'
+            '"scope_plain": "one plain-English sentence describing what work is in scope",\n'
+            '"brief_summary": "one plain-English sentence summarising what the model understood",\n'
+            '"project_type": "hospitality | graphics_brand | strategy_brand | tender_itt | cruise_fitout | unknown — use vocab signals: hospitality=lounge/tier/CGI/RIBA; graphics_brand=gift card/packaging/print/CMYK/brand identity/logo/guidelines; tender_itt=ITT/RFP/tender; cruise_fitout=shipyard/hull/fit-out",\n'
+            '"project_type_confidence": "high | medium | low",\n'
+            '"project_type_question": "plain-language question if confidence medium or low, else empty string",\n'
+            '"client_confidence": "high | medium | low",\n'
+            '"client_question": "plain-language question if confidence medium or low, else empty string",\n'
+            '"proceed_direct": "true | false — true only if project_type_confidence AND client_confidence are both high AND contains_internal_notes is no"\n'
             '}'
         )
 
@@ -1259,46 +951,16 @@ def run_extraction(job_id, pdf_b64=None, brief_text=None, prior_work='', support
         else:
             msg_content = extract_prompt + '\n\nBrief:\n' + (brief_text or '')[:4000]
 
-        resp = None
-        for attempt in range(4):
-            try:
-                if attempt > 0:
-                    wait = [0, 25, 45, 70][attempt]
-                    progress(f'Rate limit reached — retrying extraction in {wait}s...', 5)
-                    time.sleep(wait)
-                resp = client.messages.create(
-                    model='claude-sonnet-4-6',
-                    max_tokens=1400,
-                    messages=[{'role': 'user', 'content': msg_content}]
-                )
-                break
-            except anthropic.RateLimitError:
-                if attempt == 3:
-                    raise ValueError(
-                        'Rate limit reached reading the brief. Try again in a minute.'
-                    )
+        resp = client.messages.create(
+            model='claude-sonnet-4-20250514',
+            max_tokens=1400,
+            messages=[{'role': 'user', 'content': msg_content}]
+        )
         raw = resp.content[0].text.replace('```json', '').replace('```', '').strip()
         m = re.search(r'\{[\s\S]*\}', raw)
         if not m:
             raise ValueError('Could not extract brief data from the document.')
-        ex = repair_json(m.group(0))
-        if ex is None:
-            # Last resort: ask the model to re-emit the same JSON, valid this time
-            progress('Brief data needed a re-pass — retrying...', 8)
-            fix_resp = client.messages.create(
-                model='claude-sonnet-4-6',
-                max_tokens=1400,
-                messages=[{'role': 'user', 'content':
-                    'The following text should be valid JSON but failed to parse. '
-                    'Return ONLY the corrected, valid JSON with no markdown, no explanation, '
-                    'and all string values properly escaped (especially apostrophes and quotes):\n\n'
-                    + m.group(0)}]
-            )
-            fix_raw = fix_resp.content[0].text.replace('```json', '').replace('```', '').strip()
-            fix_m = re.search(r'\{[\s\S]*\}', fix_raw)
-            ex = repair_json(fix_m.group(0)) if fix_m else None
-            if ex is None:
-                raise ValueError('Could not parse brief data as JSON, even after a repair pass.')
+        ex = json.loads(m.group(0))
         update_job(job_id, extracted=ex)
 
         meta = {
@@ -1311,7 +973,6 @@ def run_extraction(job_id, pdf_b64=None, brief_text=None, prior_work='', support
             'lead_architect':        ex.get('lead_architect', ''),
             'project_manager':       ex.get('project_manager', ''),
             'brief_type':            ex.get('brief_type', ''),
-            'brief_source':          ex.get('brief_source', ''),
             'continuation':          ex.get('continuation', 'no'),
             'prior_stages_completed':ex.get('prior_stages_completed', ''),
             'riba_stages':           ex.get('riba_stages', ''),
@@ -1326,7 +987,7 @@ def run_extraction(job_id, pdf_b64=None, brief_text=None, prior_work='', support
             'key_preferences':       ex.get('key_preferences', ex.get('key_requirements', '')),
             'client_dislikes':       ex.get('client_dislikes', ''),
             'design_approach':       ex.get('design_approach', ''),
-            # ── New triage fields ───────────────────────────────────────────
+            # New project-type and triage fields
             'project_type':          ex.get('project_type', ''),
             'project_type_confidence': ex.get('project_type_confidence', 'high'),
             'project_type_question': ex.get('project_type_question', ''),
@@ -1340,66 +1001,13 @@ def run_extraction(job_id, pdf_b64=None, brief_text=None, prior_work='', support
             'brief_summary':         ex.get('brief_summary', ''),
             'proceed_direct':        str(ex.get('proceed_direct', 'true')).lower() == 'true',
             'date':                  time.strftime('%-d %B %Y'),
+            'key_requirements':      ex.get('key_requirements', ''),
+            'key_constraints':       ex.get('key_constraints', ''),
+            'key_preferences':       ex.get('key_preferences', ex.get('key_requirements', '')),
+            'client_dislikes':       ex.get('client_dislikes', ''),
+            'design_approach':       ex.get('design_approach', ''),
+            'date':                  time.strftime('%-d %B %Y'),
         }
-
-        # ── STEP 1b: SUMMARISE SUPPORTING DOCUMENTS (each its own call) ─────
-        # Deliberately NOT combined into the main extraction call above —
-        # see the comment there. Each supporting doc gets its own small,
-        # focused summarisation call (short max_tokens, asks for a brief
-        # note rather than full extraction), with a pause between calls so
-        # token usage is spread across the per-minute window rather than
-        # concentrated in one request.
-        supporting_summaries = []
-        if supporting_docs_b64:
-            for i, doc in enumerate(supporting_docs_b64):
-                progress(f'Reading supporting document {i+1} of {len(supporting_docs_b64)}: {doc["name"]}...', 6)
-                summary_prompt = (
-                    f'This is a supporting context document called "{doc["name"]}", attached alongside '
-                    'a primary client brief for a hospitality interior design proposal. Read it and write '
-                    'a concise note (4-8 sentences) covering only information relevant to a design proposal: '
-                    'spaces, tiers, capacities, budgets, constraints, requirements, names, dates. Skip anything '
-                    'not relevant to scoping interior design work. Do not invent information not present in the '
-                    'document. Return plain text only, no markdown, no headers.'
-                )
-                doc_msg_content = [
-                    {'type': 'document', 'source': {'type': 'base64', 'media_type': 'application/pdf', 'data': doc['b64']}},
-                    {'type': 'text', 'text': summary_prompt},
-                ]
-                doc_resp = None
-                for attempt in range(3):
-                    try:
-                        if attempt > 0:
-                            wait = [0, 25, 45][attempt]
-                            progress(f'Rate limit — retrying {doc["name"]} in {wait}s...', 6)
-                            time.sleep(wait)
-                        doc_resp = client.messages.create(
-                            model='claude-sonnet-4-6',
-                            max_tokens=400,
-                            messages=[{'role': 'user', 'content': doc_msg_content}]
-                        )
-                        break
-                    except anthropic.RateLimitError:
-                        if attempt == 2:
-                            doc_resp = None
-                    except Exception:
-                        doc_resp = None
-                        break
-                if doc_resp is not None:
-                    summary_text = doc_resp.content[0].text.strip()
-                    supporting_summaries.append(f'[{doc["name"]}]: {summary_text}')
-                else:
-                    supporting_summaries.append(
-                        f'[{doc["name"]}]: Could not be read — rate limit or processing error. '
-                        'Review this document manually before sending the proposal.'
-                    )
-                # Brief pause between supporting-doc calls, and before the
-                # next stage of the pipeline, to spread token usage over time
-                # rather than bursting several calls back to back.
-                if i < len(supporting_docs_b64) - 1:
-                    time.sleep(8)
-
-        if supporting_summaries:
-            meta['supporting_context'] = '\n\n'.join(supporting_summaries)
         update_job(job_id, meta=meta)
         raw_spaces = ex.get('spaces', [])
         spaces_text = '\n'.join(
@@ -1419,38 +1027,7 @@ def run_extraction(job_id, pdf_b64=None, brief_text=None, prior_work='', support
 
         progress(f'Brief read — {meta["client"] or "client"} / {meta["venue"] or "project"}', 10)
 
-        # Extraction complete. Store everything needed for generation and pause.
-        # The frontend detects 'awaiting_confirmation' and shows Screen A.
-        # If proceed_direct is True, the frontend calls /confirm immediately
-        # and generation starts without user interaction.
-        update_job(job_id,
-                   status='awaiting_confirmation',
-                   meta=meta,
-                   spaces_text=spaces_text,
-                   pipeline_start_ts=pipeline_start_ts,
-                   supporting_docs_b64_count=len(supporting_docs_b64))
-
-    except Exception as e:
-        update_job(job_id, status='error', error=str(e))
-        progress(f'Error reading brief: {e}', None)
-
-
-def run_generation(job_id):
-    """Thread 2: research → sections → build PPTX. Started only after
-    /confirm is called with triage-confirmed meta fields."""
-    job = load_job(job_id) or {}
-    meta = job.get('meta', {})
-    spaces_text = job.get('spaces_text', '') or meta.get('scope', 'Not listed')
-    pipeline_start_ts = job.get('pipeline_start_ts', time.time())
-    supporting_docs_count = job.get('supporting_docs_b64_count', 0)
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
-    def progress(msg, pct=None):
-        append_progress(job_id, msg, pct)
-
-    update_job(job_id, status='running')
-
-    try:
+        # ── STEP 2: RESEARCH ─────────────────────────────────────────────────
         progress('Researching the client...', 15)
         time.sleep(12)  # Let rate limit recover after extraction
 
@@ -1468,7 +1045,7 @@ def run_generation(job_id):
             )
             try:
                 resp2 = client.messages.create(
-                    model='claude-sonnet-4-6',
+                    model='claude-sonnet-4-20250514',
                     max_tokens=800,
                     tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
                     messages=[{'role': 'user', 'content': research_prompt}]
@@ -1487,13 +1064,7 @@ def run_generation(job_id):
         ctx = build_context(meta, spaces_text)
         sections = []
         total = len(SECTIONS)
-        # Wider gap when supporting docs were processed earlier in this same
-        # job — those calls already consumed part of the per-minute token
-        # budget before this loop even starts, so the default 7s gap isn't
-        # enough slack on lower usage tiers. This doesn't remove the
-        # underlying ceiling (see console.anthropic.com/settings/limits) but
-        # reduces how often a complex, multi-document brief trips it.
-        GAP = 14 if supporting_docs_count > 0 else 7
+        GAP = 7  # seconds between API calls
 
         for i, (sid, label, prompt_tpl) in enumerate(SECTIONS):
             pct = 20 + int((i / total) * 65)
@@ -1505,32 +1076,16 @@ def run_generation(job_id):
                 ctx=ctx
             )
 
-            # Multi-space briefs (e.g. 8+ named lounges/boxes at a stadium)
-            # push every stage section — not just stage456 — toward covering
-            # many sub-stages in one response. An 800-token budget tuned for a
-            # single-space brief truncates Deliverables (or whichever section
-            # the model writes last) once enough spaces are in scope. Scale
-            # up by space count for any stage section, with stage456 getting
-            # an extra margin since it covers three RIBA stages at once.
-            num_spaces = len(raw_spaces) if raw_spaces else 0
-            is_stage_section = sid in ('stage1', 'stage2', 'stage3', 'stage456')
-            if is_stage_section and num_spaces >= 5:
-                section_max_tokens = 2400 if sid == 'stage456' else 1700
-            elif sid == 'stage456':
-                section_max_tokens = 1900
-            else:
-                section_max_tokens = 800
-
-            for attempt in range(4):
+            for attempt in range(3):
                 try:
                     if attempt > 0:
-                        wait = [0, 35, 55, 80][attempt]
+                        wait = 35 if attempt == 1 else 55
                         progress(f'Rate limit — retrying {label} in {wait}s...', pct)
                         time.sleep(wait)
 
                     resp3 = client.messages.create(
-                        model='claude-sonnet-4-6',
-                        max_tokens=section_max_tokens,
+                        model='claude-sonnet-4-20250514',
+                        max_tokens=800,
                         system=SYSTEM_PROMPT,
                         messages=[{'role': 'user', 'content': prompt}]
                     )
@@ -1539,7 +1094,7 @@ def run_generation(job_id):
                     append_section(job_id, sec)
                     break
                 except anthropic.RateLimitError:
-                    if attempt == 3:
+                    if attempt == 2:
                         sec = {'id': sid, 'heading': label, 'body': '[Could not generate — add manually]'}
                         sections.append(sec)
                         append_section(job_id, sec)
@@ -1566,51 +1121,20 @@ def run_generation(job_id):
                 raise FileNotFoundError('PowerPoint was not created')
             update_job(job_id, pptx_path=pptx_path, status='done')
             progress('Done — click Download PowerPoint or Word Doc', 100)
-            log_usage_event(
-                job_id, 'completed',
-                client=meta.get('client', ''), venue=meta.get('venue', ''),
-                brief_type=meta.get('brief_type', ''), is_riba=meta.get('is_riba', ''),
-                pptx_ready=True,
-                duration_seconds=round(time.time() - pipeline_start_ts, 1),
-                num_supporting_docs=supporting_docs_count,
-            )
         except Exception as pptx_err:
             import traceback
             err_detail = traceback.format_exc()
             update_job(job_id, status='done', pptx_error=str(pptx_err), pptx_traceback=err_detail[-500:])
             progress(f'Sections complete. PowerPoint failed: {pptx_err}', 100)
-            log_usage_event(
-                job_id, 'pptx_failed',
-                client=meta.get('client', ''), venue=meta.get('venue', ''),
-                brief_type=meta.get('brief_type', ''), is_riba=meta.get('is_riba', ''),
-                pptx_ready=False, error=str(pptx_err)[:200],
-                duration_seconds=round(time.time() - pipeline_start_ts, 1),
-                num_supporting_docs=supporting_docs_count,
-            )
 
     except Exception as e:
         import traceback
         # Even on pipeline error, mark done if we have sections
         job = load_job(job_id) or {}
-        meta_for_log = job.get('meta', {})
         if job.get('sections'):
             update_job(job_id, status='done', error=str(e))
-            log_usage_event(
-                job_id, 'completed_with_error',
-                client=meta_for_log.get('client', ''), venue=meta_for_log.get('venue', ''),
-                error=str(e)[:200],
-                duration_seconds=round(time.time() - pipeline_start_ts, 1),
-                num_supporting_docs=supporting_docs_count,
-            )
         else:
             update_job(job_id, status='error', error=str(e))
-            log_usage_event(
-                job_id, 'failed',
-                client=meta_for_log.get('client', ''), venue=meta_for_log.get('venue', ''),
-                error=str(e)[:200],
-                duration_seconds=round(time.time() - pipeline_start_ts, 1),
-                num_supporting_docs=supporting_docs_count,
-            )
         progress(f'Error: {e}', None)
 
 
@@ -1661,8 +1185,6 @@ nav{background:var(--nv);padding:0 2rem;display:flex;align-items:center;
 .tab-btn.active{background:var(--nv);color:var(--white)}
 .tab-btn.inactive{background:var(--bg);color:var(--tx2);border-left:1px solid var(--bd)}
 .field-label{display:block;font-size:12px;font-weight:600;margin-bottom:5px;color:var(--tx2)}
-.confirm-question{margin-top:5px;padding:6px 10px;background:#FFF8ED;border-left:3px solid #C9A84C;border-radius:0 4px 4px 0;font-size:12px;color:#C9A84C;font-style:italic}
-.confirm-field-amber input,.confirm-field-amber select{border-color:#C9A84C !important}
 input[type=file]{display:block;width:100%;font-size:13px;padding:8px;
   border:1px solid var(--bd);border-radius:var(--r);background:var(--bg);cursor:pointer;font-family:inherit}
 textarea{width:100%;font-size:13px;padding:10px;border:1px solid var(--bd);
@@ -1790,24 +1312,6 @@ textarea:focus{border-color:var(--nv)}
         </div>
       </div>
 
-      <div style="margin-top:.75rem;padding:.75rem;background:var(--bg);border:1px solid var(--bd);border-radius:var(--r)">
-        <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem">
-          <label class="field-label" style="margin:0">Supporting documents?</label>
-          <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--tx2);cursor:pointer">
-            <input type="checkbox" id="supporting-docs-toggle" onchange="toggleSupportingDocs()">
-            Yes — add extra context documents
-          </label>
-        </div>
-        <div id="supporting-docs-panel" style="display:none;margin-top:.5rem">
-          <label class="field-label">Upload supporting PDFs (briefing decks, RFP appendices, prior reports, brand guidelines, etc.)</label>
-          <input type="file" id="supporting-docs-input" accept=".pdf" multiple>
-          <p style="font-size:11px;color:var(--tx2);margin-top:.4rem">
-            Up to 3 files, PDF only. These are read alongside the main brief in a single pass, so keep them focused — every extra page adds to one request and can hit a rate limit on complex briefs. The main brief still takes priority if anything conflicts.
-          </p>
-          <div id="supporting-docs-list" style="margin-top:.4rem;font-size:12px;color:var(--tx2)"></div>
-        </div>
-      </div>
-
       <div id="submit-error" class="error-box hidden"></div>
 
       <div style="margin-top:1rem">
@@ -1836,90 +1340,9 @@ textarea:focus{border-color:var(--nv)}
     </div>
   </div>
 
-  <!-- SCREEN A — BRIEF CONFIRMATION (appears after extraction, before generation) -->
-  <div class="panel hidden" id="panel-confirm">
-    <div class="panel-head"><h2>Confirm brief</h2><span class="step-badge">Screen A — before generating</span></div>
-    <div class="panel-body">
-
-      <!-- Summary strip -->
-      <div id="confirm-summary" style="padding:10px 14px;border-radius:6px;margin-bottom:1rem;font-size:13px;font-weight:500"></div>
-
-      <!-- Internal notes warning (only shown if detected) -->
-      <div id="confirm-notes-warning" class="hidden" style="background:#FFF8ED;border:1px solid #C9A84C;border-radius:6px;padding:10px 14px;margin-bottom:1rem;font-size:13px;color:#C9A84C"></div>
-
-      <!-- Confirmed fields grid -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1rem">
-
-        <div>
-          <label class="field-label">Project type</label>
-          <select id="c-project-type" class="t-sel" onchange="onTriageFieldChange('project_type')">
-            <option value="hospitality">Hospitality / Interior design</option>
-            <option value="graphics_brand">Graphics &amp; Brand</option>
-            <option value="strategy_brand">Brand strategy</option>
-            <option value="tender_itt">Formal tender / ITT</option>
-            <option value="cruise_fitout">Cruise / Fit-out</option>
-            <option value="unknown">Unclear — needs discussion</option>
-          </select>
-          <div id="q-project-type" class="confirm-question hidden"></div>
-        </div>
-
-        <div>
-          <label class="field-label">Client name</label>
-          <input type="text" id="c-client" class="t-sel" oninput="onTriageFieldChange('client')" placeholder="Client name">
-          <div id="q-client" class="confirm-question hidden"></div>
-        </div>
-
-        <div>
-          <label class="field-label">Venue / project</label>
-          <input type="text" id="c-venue" class="t-sel" oninput="onTriageFieldChange('venue')" placeholder="Venue or project name">
-        </div>
-
-        <div>
-          <label class="field-label">Contact name</label>
-          <input type="text" id="c-contact" class="t-sel" oninput="onTriageFieldChange('contact')" placeholder="Primary contact">
-        </div>
-
-        <div>
-          <label class="field-label">Scope</label>
-          <input type="text" id="c-scope" class="t-sel" oninput="onTriageFieldChange('scope_plain')" placeholder="Plain-English description of the work">
-        </div>
-
-        <div>
-          <label class="field-label">Brief source</label>
-          <select id="c-brief-source" class="t-sel" onchange="onTriageFieldChange('brief_source')">
-            <option value="Direct approach">Direct approach</option>
-            <option value="Via architect or PM">Via architect or PM</option>
-            <option value="Formal open tender (ITT)">Formal tender / ITT</option>
-            <option value="Referral">Referral</option>
-            <option value="Repeat client">Repeat client</option>
-            <option value="Unknown">Unknown</option>
-          </select>
-        </div>
-
-      </div>
-
-      <!-- Internal notes question (only shown if detected) -->
-      <div id="confirm-notes-question" class="hidden" style="margin-bottom:1rem">
-        <label class="field-label" style="color:#C9A84C">⚠ Internal notes detected</label>
-        <p style="font-size:12px;color:var(--tx2);margin-bottom:6px">The brief appears to contain internal observations that should not appear in the proposal. The generator will automatically exclude them, but you may want to review before generating.</p>
-        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer">
-          <input type="checkbox" id="c-notes-confirmed" onchange="checkCanGenerate()">
-          Understood — proceed anyway
-        </label>
-      </div>
-
-      <div id="confirm-questions-remaining" style="font-size:12px;color:#A32D2D;margin-bottom:.75rem;display:none"></div>
-
-      <button class="btn btn-primary" id="confirm-btn" onclick="submitConfirm()" disabled>
-        Confirm and generate →
-      </button>
-      <span style="font-size:12px;color:var(--tx2);margin-left:1rem">Generation will start immediately after confirmation.</span>
-    </div>
-  </div>
-
   <!-- TRIAGE NOTES -->
-  <div class="panel hidden" id="panel-winlikelihood">
-    <div class="panel-head"><h2>Win likelihood</h2><span class="step-badge">Complete while generating — Screen B</span></div>
+  <div class="panel hidden" id="panel-triage">
+    <div class="panel-head"><h2>Triage</h2><span class="step-badge">Complete while generating</span></div>
     <div class="panel-body">
       <p style="font-size:12px;color:var(--tx2);margin-bottom:1rem">For internal use only — informs win likelihood score. Not sent to the AI.</p>
 
@@ -2073,172 +1496,10 @@ function switchTab(t) {
   document.getElementById('tab-text').className = 'tab-btn ' + (t === 'text' ? 'active' : 'inactive');
 }
 
-// ── SCREEN A — BRIEF CONFIRMATION ─────────────────────────────────────────
-// Populated when pollStatus detects status === 'awaiting_confirmation'.
-// Tracks which questions are unresolved to gate the Generate button.
-
-var triageQuestions = {};   // { fieldKey: questionText } — questions currently visible
-var triageAnswered  = {};   // { fieldKey: true } — questions resolved by user edit
-var hasInternalNotes = false;
-
-function populateConfirmScreen(data) {
-  var meta = data.meta || {};
-
-  // Summary strip
-  var summaryEl = document.getElementById('confirm-summary');
-  var summary = data.brief_summary || '';
-  var isLowConf = data.project_type_confidence === 'low' || data.client_confidence === 'low';
-  summaryEl.style.background = isLowConf ? '#FFF8ED' : '#EAF3DE';
-  summaryEl.style.border = '1px solid ' + (isLowConf ? '#C9A84C' : '#B7D89A');
-  summaryEl.style.color = isLowConf ? '#C9A84C' : '#3B6D11';
-  summaryEl.textContent = (isLowConf ? '⚠  ' : '✓  ') + (summary || 'Brief read successfully.');
-
-  // Populate editable fields
-  var ptSel = document.getElementById('c-project-type');
-  if (data.project_type) {
-    for (var i = 0; i < ptSel.options.length; i++) {
-      if (ptSel.options[i].value === data.project_type) { ptSel.selectedIndex = i; break; }
-    }
-  }
-  document.getElementById('c-client').value  = meta.client  || '';
-  document.getElementById('c-venue').value   = meta.venue   || '';
-  document.getElementById('c-contact').value = meta.contact || '';
-  document.getElementById('c-scope').value   = data.scope_plain || meta.scope || '';
-  var bsSel = document.getElementById('c-brief-source');
-  var bs = data.brief_source || meta.brief_source || '';
-  for (var j = 0; j < bsSel.options.length; j++) {
-    if (bsSel.options[j].value === bs) { bsSel.selectedIndex = j; break; }
-  }
-
-  // Register questions
-  triageQuestions = {};
-  triageAnswered  = {};
-
-  function setQuestion(fieldKey, inputId, questionId, questionText, confidence) {
-    if (confidence === 'low' || confidence === 'medium') {
-      triageQuestions[fieldKey] = questionText;
-      var qEl = document.getElementById(questionId);
-      if (qEl && questionText) {
-        qEl.textContent = '⚠ ' + questionText;
-        qEl.classList.remove('hidden');
-        var inputEl = document.getElementById(inputId);
-        if (inputEl && inputEl.parentElement) inputEl.parentElement.classList.add('confirm-field-amber');
-      }
-    }
-  }
-
-  setQuestion('project_type', 'c-project-type', 'q-project-type',
-    data.project_type_question, data.project_type_confidence);
-  setQuestion('client', 'c-client', 'q-client',
-    data.client_question, data.client_confidence);
-
-  // Internal notes
-  hasInternalNotes = (data.contains_internal_notes === 'yes');
-  if (hasInternalNotes) {
-    var desc = data.internal_notes_description || 'Internal notes detected in the brief.';
-    document.getElementById('confirm-notes-warning').textContent = '⚠ ' + desc;
-    document.getElementById('confirm-notes-warning').classList.remove('hidden');
-    document.getElementById('confirm-notes-question').classList.remove('hidden');
-  }
-
-  checkCanGenerate();
-}
-
-function onTriageFieldChange(fieldKey) {
-  // Mark this question as resolved once the user edits the field
-  if (triageQuestions[fieldKey]) {
-    triageAnswered[fieldKey] = true;
-    var qEl = document.getElementById('q-' + fieldKey.replace('_', '-'));
-    if (qEl) qEl.classList.add('hidden');
-    var inputId = fieldKey === 'project_type' ? 'c-project-type' :
-                  fieldKey === 'client' ? 'c-client' : null;
-    if (inputId) {
-      var inputEl = document.getElementById(inputId);
-      if (inputEl && inputEl.parentElement) inputEl.parentElement.classList.remove('confirm-field-amber');
-    }
-  }
-  checkCanGenerate();
-}
-
-function checkCanGenerate() {
-  var unresolvedCount = 0;
-  for (var key in triageQuestions) {
-    if (!triageAnswered[key]) unresolvedCount++;
-  }
-  if (hasInternalNotes && !document.getElementById('c-notes-confirmed').checked) {
-    unresolvedCount++;
-  }
-  var btn = document.getElementById('confirm-btn');
-  var rem = document.getElementById('confirm-questions-remaining');
-  if (unresolvedCount === 0) {
-    btn.disabled = false;
-    rem.style.display = 'none';
-  } else {
-    btn.disabled = true;
-    rem.textContent = unresolvedCount + ' question' + (unresolvedCount > 1 ? 's' : '') + ' need' + (unresolvedCount === 1 ? 's' : '') + ' resolving before generating.';
-    rem.style.display = 'block';
-  }
-}
-
-async function submitConfirm() {
-  var btn = document.getElementById('confirm-btn');
-  btn.disabled = true;
-  btn.textContent = 'Starting generation…';
-
-  var payload = {
-    project_type: document.getElementById('c-project-type').value,
-    client:       document.getElementById('c-client').value.trim(),
-    venue:        document.getElementById('c-venue').value.trim(),
-    contact:      document.getElementById('c-contact').value.trim(),
-    scope_plain:  document.getElementById('c-scope').value.trim(),
-    brief_source: document.getElementById('c-brief-source').value,
-  };
-
-  try {
-    var resp = await fetch('/confirm/' + currentJobId, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(payload)
-    });
-    var data = await resp.json();
-    if (data.error) throw new Error(data.error);
-    // Hide Screen A, resume polling — generation is now running
-    document.getElementById('panel-confirm').classList.add('hidden');
-    pollInterval = setInterval(pollStatus, 2000);
-  } catch(e) {
-    btn.disabled = false;
-    btn.textContent = 'Confirm and generate →';
-    alert('Could not start generation: ' + e.message);
-  }
-}
-
 function togglePriorWork() {
   var chk = document.getElementById('prior-work-toggle');
   document.getElementById('prior-work-panel').style.display = chk.checked ? 'block' : 'none';
 }
-
-function toggleSupportingDocs() {
-  var chk = document.getElementById('supporting-docs-toggle');
-  document.getElementById('supporting-docs-panel').style.display = chk.checked ? 'block' : 'none';
-}
-
-document.addEventListener('DOMContentLoaded', function() {
-  var input = document.getElementById('supporting-docs-input');
-  if (input) {
-    input.addEventListener('change', function() {
-      var list = document.getElementById('supporting-docs-list');
-      var files = Array.from(input.files || []);
-      if (files.length > 3) {
-        list.innerHTML = '<span style="color:#A32D2D">Please select up to 3 files — only the first 3 will be used.</span>';
-        files = files.slice(0, 3);
-      } else if (files.length) {
-        list.innerHTML = files.map(function(f) { return '\u2713 ' + f.name; }).join('<br>');
-      } else {
-        list.innerHTML = '';
-      }
-    });
-  }
-});
 
 async function submitBrief() {
   var errEl = document.getElementById('submit-error');
@@ -2260,15 +1521,6 @@ async function submitBrief() {
   if (priorToggle && priorToggle.checked) {
     var priorTxt = document.getElementById('prior-work-text').value.trim();
     if (priorTxt) fd.append('prior_work_context', priorTxt);
-  }
-
-  // Add supporting documents if provided — up to 5 PDFs, read alongside
-  // the main brief during extraction (main brief still takes priority).
-  var docsToggle = document.getElementById('supporting-docs-toggle');
-  if (docsToggle && docsToggle.checked) {
-    var docsInput = document.getElementById('supporting-docs-input');
-    var docFiles = Array.from((docsInput && docsInput.files) || []).slice(0, 3);
-    docFiles.forEach(function(file) { fd.append('supporting_docs', file); });
   }
 
   document.getElementById('submit-btn').disabled = true;
@@ -2318,31 +1570,10 @@ async function pollStatus() {
       renderSections(data.sections);
     }
 
-    // Screen A — brief confirmation
-    if (data.status === 'awaiting_confirmation') {
-      clearInterval(pollInterval);  // Pause polling — waiting for user
-      pollInterval = null;
-      document.getElementById('panel-confirm').classList.remove('hidden');
-      populateConfirmScreen(data);
-      // Auto-confirm immediately if extraction was high-confidence
-      if (data.proceed_direct === true) {
-        // Small delay so the user sees the screen briefly before it advances
-        setTimeout(function() {
-          // Only auto-confirm if no questions were actually registered
-          var hasQ = Object.keys(triageQuestions).length > 0;
-          if (!hasQ && !hasInternalNotes) {
-            submitConfirm();
-          }
-          // If questions exist despite proceed_direct=true, let the user resolve them
-        }, 800);
-      }
-      return;  // Don't process any other status logic while awaiting
-    }
-
-    // Store meta and reveal Screen B (win likelihood) during generation
+    // Store meta and reveal triage panel
     if (data.meta && data.meta.client) {
       currentMeta = data.meta;
-      document.getElementById('panel-winlikelihood').classList.remove('hidden');
+      document.getElementById('panel-triage').classList.remove('hidden');
     }
 
     // Done
@@ -2561,7 +1792,7 @@ function resetAll() {
   document.getElementById('submit-btn').disabled = false;
   document.getElementById('submit-btn').textContent = 'Generate proposal →';
   document.getElementById('nav-status').textContent = '';
-  ['panel-progress','panel-confirm','panel-winlikelihood','panel-sections','panel-intel','panel-actions'].forEach(function(id) {
+  ['panel-progress','panel-triage','panel-sections','panel-intel','panel-actions'].forEach(function(id) {
     document.getElementById(id).classList.add('hidden');
   });
   document.getElementById('submit-error').classList.add('hidden');
@@ -2599,102 +1830,6 @@ def health():
         'jobs_dir_exists': os.path.exists(JOBS_DIR),
     })
 
-@app.route('/usage')
-def usage_dashboard():
-    """Internal usage dashboard — shows every generation attempt logged via
-    log_usage_event(). Protected by USAGE_DASHBOARD_KEY (set in Railway's
-    environment variables); without it set, this route refuses all access.
-    Visit /usage?key=YOUR_KEY to view. Visit /usage?key=YOUR_KEY&migrate=1
-    once to backfill from any job files still on disk (best-effort — see
-    migrate_existing_jobs_to_usage_log for why this can't recover jobs from
-    before the last server restart)."""
-    if not USAGE_DASHBOARD_KEY:
-        return 'Usage dashboard is disabled — set USAGE_DASHBOARD_KEY in Railway environment variables to enable it.', 403
-    if request.args.get('key') != USAGE_DASHBOARD_KEY:
-        return 'Forbidden — missing or incorrect key.', 403
-
-    migration_summary = None
-    if request.args.get('migrate'):
-        migration_summary = migrate_existing_jobs_to_usage_log()
-
-    events = read_usage_log()
-    events.sort(key=lambda e: e.get('ts', 0), reverse=True)
-
-    total_started = sum(1 for e in events if e.get('event') == 'started')
-    total_completed = sum(1 for e in events if e.get('event') in ('completed', 'completed_with_error'))
-    total_failed = sum(1 for e in events if e.get('event') in ('failed', 'pptx_failed'))
-    docs_used = sum(1 for e in events if e.get('event') == 'started' and e.get('num_supporting_docs', 0) > 0)
-
-    def esc(s):
-        return str(s).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
-    rows_html = []
-    for e in events:
-        event = e.get('event', '')
-        colour = {'completed': '#3B6D11', 'started': '#666', 'failed': '#A32D2D',
-                  'pptx_failed': '#A32D2D', 'completed_with_error': '#C9A84C'}.get(event, '#666')
-        rows_html.append(f"""
-            <tr>
-              <td>{esc(e.get('date',''))}</td>
-              <td><span style="color:{colour};font-weight:600">{esc(event)}</span></td>
-              <td>{esc(e.get('client',''))}</td>
-              <td>{esc(e.get('venue',''))}</td>
-              <td>{esc(e.get('brief_type',''))}</td>
-              <td>{esc(e.get('duration_seconds','')) }{'s' if e.get('duration_seconds') else ''}</td>
-              <td>{esc(e.get('num_supporting_docs',''))}</td>
-              <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;color:#A32D2D">{esc(e.get('error',''))}</td>
-              <td style="color:#999;font-size:11px">{esc(e.get('job_id',''))}</td>
-            </tr>""")
-
-    migration_html = ''
-    if migration_summary is not None:
-        migration_html = (
-            f'<div style="background:#EAF3DE;border:1px solid #B7D89A;border-radius:6px;'
-            f'padding:10px 14px;margin-bottom:1rem;font-size:13px">'
-            f'Migration ran: found {migration_summary["found"]} job file(s) on disk, '
-            f'added {migration_summary["migrated"]} new event(s), '
-            f'skipped {migration_summary["skipped"]} (already logged or unreadable). '
-            f'Note: this can only recover jobs that survived up to the most recent server restart — '
-            f'JOBS_DIR is ephemeral storage on Railway and is wiped on every redeploy.'
-            f'</div>'
-        )
-
-    html = f"""<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>Usage — 20.20 Proposal Generator</title>
-<style>
-body{{font-family:-apple-system,Arial,sans-serif;background:#F5F4F1;margin:0;padding:2rem;color:#1A1A1A}}
-h1{{font-size:20px;margin-bottom:.25rem}}
-.sub{{color:#666;font-size:13px;margin-bottom:1.5rem}}
-.stats{{display:flex;gap:1rem;margin-bottom:1.5rem;flex-wrap:wrap}}
-.stat{{background:#fff;border:1px solid #E0DED8;border-radius:8px;padding:.75rem 1.25rem;min-width:120px}}
-.stat .n{{font-size:24px;font-weight:700;color:#1B2340}}
-.stat .l{{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#666}}
-table{{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;font-size:13px}}
-th{{background:#1B2340;color:#fff;text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.04em}}
-td{{padding:7px 10px;border-bottom:1px solid #EEE}}
-tr:hover{{background:#FAFAF8}}
-a{{color:#1B2340}}
-</style></head>
-<body>
-  <h1>Proposal generator — usage log</h1>
-  <div class="sub">{len(events)} total events logged. <a href="?key={esc(USAGE_DASHBOARD_KEY)}&migrate=1">Run migration from existing job files</a></div>
-  {migration_html}
-  <div class="stats">
-    <div class="stat"><div class="n">{total_started}</div><div class="l">Generations started</div></div>
-    <div class="stat"><div class="n">{total_completed}</div><div class="l">Completed</div></div>
-    <div class="stat"><div class="n">{total_failed}</div><div class="l">Failed</div></div>
-    <div class="stat"><div class="n">{docs_used}</div><div class="l">Used supporting docs</div></div>
-  </div>
-  <table>
-    <tr><th>Date</th><th>Event</th><th>Client</th><th>Venue</th><th>Brief type</th><th>Duration</th><th>Supp. docs</th><th>Error</th><th>Job ID</th></tr>
-    {''.join(rows_html) if rows_html else '<tr><td colspan="9" style="text-align:center;color:#999;padding:2rem">No usage logged yet.</td></tr>'}
-  </table>
-</body></html>"""
-    return html
-
-def index():
-    return INDEX_HTML
-
 @app.route('/')
 def index():
     return INDEX_HTML
@@ -2705,135 +1840,33 @@ def submit():
         return jsonify({'error': 'API key not configured on server.'}), 500
 
     job_id = str(uuid.uuid4())[:8]
+    save_job(job_id, {
+        'status': 'running',
+        'progress': [],
+        'sections': [],
+        'meta': {},
+        'intel': {},
+        'extracted': {},
+        'pptx_path': None,
+        'error': None,
+    })
 
-    try:
-        save_job(job_id, {
-            'status': 'running',
-            'progress': [],
-            'sections': [],
-            'meta': {},
-            'intel': {},
-            'extracted': {},
-            'pptx_path': None,
-            'error': None,
-        })
+    pdf_b64 = None
+    brief_text = None
+    prior_work = request.form.get('prior_work_context', '')
 
-        pdf_b64 = None
-        brief_text = None
-        prior_work = request.form.get('prior_work_context', '')
+    if 'brief_pdf' in request.files and request.files['brief_pdf'].filename:
+        f = request.files['brief_pdf']
+        pdf_b64 = base64.b64encode(f.read()).decode('ascii')
+    elif request.form.get('brief_text'):
+        brief_text = request.form.get('brief_text')
+    else:
+        return jsonify({'error': 'Please upload a PDF or paste the brief text.'}), 400
 
-        if 'brief_pdf' in request.files and request.files['brief_pdf'].filename:
-            f = request.files['brief_pdf']
-            pdf_b64 = base64.b64encode(f.read()).decode('ascii')
-        elif request.form.get('brief_text'):
-            brief_text = request.form.get('brief_text')
-        else:
-            return jsonify({'error': 'Please upload a PDF or paste the brief text.'}), 400
-
-        # Supporting context documents — up to 3 extra PDFs read alongside the
-        # main brief during extraction. The main brief still takes priority if
-        # anything conflicts; these just add context the model wouldn't
-        # otherwise see (RFP appendices, brand guidelines, prior reports, etc.)
-        supporting_docs_b64 = []
-        supporting_files = request.files.getlist('supporting_docs')[:3]
-        for sf in supporting_files:
-            if not sf or not sf.filename:
-                continue
-            if not sf.filename.lower().endswith('.pdf'):
-                continue
-            data = sf.read()
-            if len(data) > 8 * 1024 * 1024:  # 8MB per supporting file
-                continue
-            supporting_docs_b64.append({
-                'name': sf.filename,
-                'b64': base64.b64encode(data).decode('ascii'),
-            })
-
-    except RequestEntityTooLarge:
-        return jsonify({'error': (
-            'The brief and supporting documents together are too large for one upload. '
-            'Try fewer supporting documents, or smaller files, and submit again.'
-        )}), 413
-    except Exception as e:
-        import traceback
-        print('SUBMIT ERROR:', traceback.format_exc())
-        return jsonify({'error': f'Could not process the upload: {str(e)[:200]}'}), 500
-
-    t = threading.Thread(target=run_extraction,
-                          args=(job_id, pdf_b64, brief_text, prior_work, supporting_docs_b64),
-                          daemon=True)
+    t = threading.Thread(target=run_pipeline, args=(job_id, pdf_b64, brief_text, prior_work), daemon=True)
     t.start()
 
     return jsonify({'job_id': job_id})
-
-
-@app.route('/confirm/<job_id>', methods=['POST'])
-def confirm(job_id):
-    """Screen A confirmation endpoint. Accepts triage-corrected meta fields,
-    merges them into the job's extracted meta, then starts run_generation in
-    a new thread. Called automatically by the frontend when proceed_direct is
-    true (clean brief), or when the user clicks Generate on Screen A."""
-    job = load_job(job_id)
-    if not job:
-        return jsonify({'error': 'Job not found'}), 404
-    if job.get('status') not in ('awaiting_confirmation', 'running'):
-        return jsonify({'error': f'Job is not awaiting confirmation (status: {job.get("status")})'}), 400
-
-    data = request.get_json() or {}
-    meta = job.get('meta', {})
-
-    # Merge any user corrections from the triage screen into meta.
-    # Only update fields that were actually sent (empty string = intentionally
-    # cleared; absent key = user didn't touch it, keep extraction value).
-    triage_fields = ['project_type', 'client', 'venue', 'contact', 'brief_source', 'scope_plain']
-    for field in triage_fields:
-        if field in data:
-            meta[field] = data[field]
-            # Keep scope consistent
-            if field == 'scope_plain':
-                meta['scope'] = data[field]
-
-    # If project type was corrected, update is_riba accordingly
-    if 'project_type' in data:
-        pt = data['project_type']
-        meta['is_riba'] = 'yes' if pt in ('hospitality',) and 'riba' in meta.get('riba_stages','').lower() else meta.get('is_riba','no')
-        if pt not in ('hospitality',):
-            meta['is_riba'] = 'no'
-
-    update_job(job_id, meta=meta, status='running')
-    t = threading.Thread(target=run_generation, args=(job_id,), daemon=True)
-    t.start()
-    return jsonify({'ok': True})
-
-@app.route('/jobs')
-def list_jobs():
-    """Diagnostic — lists all current jobs in JOBS_DIR with their status
-    and last progress message. Key-protected with USAGE_DASHBOARD_KEY."""
-    if not USAGE_DASHBOARD_KEY or request.args.get('key') != USAGE_DASHBOARD_KEY:
-        return 'Forbidden', 403
-    jobs = []
-    if os.path.isdir(JOBS_DIR):
-        for fname in sorted(os.listdir(JOBS_DIR), reverse=True):
-            if not fname.endswith('.json') or fname.startswith('_'):
-                continue
-            job = load_job(fname[:-5])
-            if not job:
-                continue
-            meta = job.get('meta', {})
-            prog = job.get('progress', [])
-            last_msg = prog[-1].get('msg','') if prog else ''
-            jobs.append({
-                'job_id':   fname[:-5],
-                'status':   job.get('status'),
-                'client':   meta.get('client',''),
-                'venue':    meta.get('venue',''),
-                'last_msg': last_msg,
-                'error':    job.get('error',''),
-                'proceed_direct': meta.get('proceed_direct'),
-                'project_type':   meta.get('project_type',''),
-                'project_type_confidence': meta.get('project_type_confidence',''),
-            })
-    return jsonify({'jobs_dir': JOBS_DIR, 'count': len(jobs), 'jobs': jobs})
 
 @app.route('/debug/<job_id>')
 def debug(job_id):
@@ -2858,28 +1891,15 @@ def status(job_id):
     job = load_job(job_id)
     if not job:
         return jsonify({'error': 'Job not found'}), 404
-    meta = job.get('meta', {})
     return jsonify({
-        'status':       job.get('status'),
-        'progress':     job.get('progress', []),
-        'sections':     job.get('sections', []),
-        'meta':         meta,
-        'intel':        job.get('intel', {}),
-        'error':        job.get('error'),
-        'pptx_error':   job.get('pptx_error'),
-        'pptx_ready':   bool(job.get('pptx_path') and os.path.exists(job.get('pptx_path',''))),
-        # Triage fields — consumed by Screen A
-        'proceed_direct':        meta.get('proceed_direct', True),
-        'brief_summary':         meta.get('brief_summary', ''),
-        'project_type':          meta.get('project_type', ''),
-        'project_type_confidence': meta.get('project_type_confidence', 'high'),
-        'project_type_question': meta.get('project_type_question', ''),
-        'client_confidence':     meta.get('client_confidence', 'high'),
-        'client_question':       meta.get('client_question', ''),
-        'contains_internal_notes': meta.get('contains_internal_notes', 'no'),
-        'internal_notes_description': meta.get('internal_notes_description', ''),
-        'scope_plain':           meta.get('scope_plain', meta.get('scope', '')),
-        'brief_source':          meta.get('brief_source', ''),
+        'status':     job.get('status'),
+        'progress':   job.get('progress', []),
+        'sections':   job.get('sections', []),
+        'meta':       job.get('meta', {}),
+        'intel':      job.get('intel', {}),
+        'error':      job.get('error'),
+        'pptx_error': job.get('pptx_error'),
+        'pptx_ready': bool(job.get('pptx_path') and os.path.exists(job.get('pptx_path',''))),
     })
 
 @app.route('/rebuild', methods=['POST'])
@@ -2907,7 +1927,7 @@ def rebuild():
 
 @app.route('/download-docx/<job_id>')
 def download_docx(job_id):
-    job = load_job(job_id)
+    job = get_job(job_id)
     if not job:
         return 'Job not found', 404
     sections = job.get('sections', [])

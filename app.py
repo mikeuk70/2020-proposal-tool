@@ -827,7 +827,7 @@ The PROJECT TYPE field in context tells you what kind of proposal this is. Follo
 
 If the project type is unclear or flagged as catering/operations, write conservatively and flag the uncertainty.
 
-VOICE: Confident, direct, commercially aware, personal. Short sentences. Active voice. No em dashes. No AI phrases (leveraging, seamless, holistic, transformative). The client name appears only in the cover letter — all other sections say "the club", "the venue", "the project".
+VOICE: Confident, direct, commercially aware, personal. Short sentences. Active voice. No em dashes. No AI phrases (leveraging, seamless, holistic, transformative). The client name appears only in the cover letter — all other sections refer to the client as "the client", "the organisation", or use the venue/project name where relevant. Never use "the club" for non-sports clients.
 
 DESIGN PRINCIPLES: Hospitality Pyramid (tier each space), Narrative Before Design (names and stories before materials), Guest Journey Mapping, Brand Integration Without Decoration, Non-Matchday Flexibility, Graphic Identity as Interior Design, Commercial Consciousness, CGI from Stage 2, Collaborative Design Team, Concept Freeze.
 
@@ -873,7 +873,7 @@ Format rules:
 - No markdown. No asterisks. No bold (**text**). No headers (#).
 - Write the four section labels as plain text on their own line followed by a colon.
 - The Meetings section must name specific meeting types and cadence — not a placeholder.
-- Use "the club", "the venue", "the project" — not the client name.
+- Use "the client", "the organisation", "the venue", or "the project" — not the client name, and never "the club" for non-sports clients.
 
 {ctx}"""
 
@@ -928,7 +928,7 @@ If the brief names constraints (fixed lounge sizes, seat positions, kitchen area
 If the client mentioned dislikes or things to avoid, include them.
 If spaces are not named in the brief, acknowledge this and note what IS known.
 
-Use "the club" or "the venue" not the client name.
+Use "the client", "the organisation", or "the venue" — not the client name, and never "the club" for non-sports clients.
 No markdown. No bold text. No bullet points — write in short paragraphs.
 Use the EXACT TERMINOLOGY from the brief — if they name a space, use that exact name. If they give capacity figures or budget ranges, include them verbatim.
 Flag anything that needs confirming with: [CONFIRM WITH CLIENT: what needs clarifying]
@@ -950,6 +950,159 @@ Flag anything that needs confirming with: [CONFIRM WITH CLIENT: what needs clari
      'for example: "Review this proposal: Share it with your team and flag any questions before we proceed." '
      'Keep the title under 5 words. Direct and confident. No client name.\n\n{ctx}'),
 ]
+
+# ── GRAPHICS / BRAND TEMPLATE ─────────────────────────────────────────────────
+# Used when project_type is 'graphics_brand' or 'other' (non-hospitality).
+# Shorter, fewer stages, no spatial language, no CGI, no RIBA references.
+# Deliverables are artwork files, guidelines, print-ready assets.
+SECTIONS_GRAPHICS = [
+    ('cover', 'Cover letter',
+     '''Write the cover letter for this 20.20 proposal. It appears as the "Hello" slide.
+
+First line: Hello [first name of contact]
+Then: Dear [Name],
+
+Write 3 SHORT paragraphs. Maximum 3 sentences each.
+
+Para 1: What drew 20.20 to this project — something specific about the brief or the brand challenge.
+Para 2: What this proposal covers — the specific deliverables (be concrete: gift cards, brand guidelines, artwork files etc.)
+Para 3: What we need from the client to deliver it (VBI/brand guidelines access, copy approval, timeline, sign-off process).
+
+Sign off: "Kind regards," then "The 20.20 team"
+
+Rules:
+- No markdown. No asterisks. No bullet points.
+- Short sentences. No em dashes. Direct tone.
+- Never use "the club" — use "the brand", "the organisation" or the client name in the first mention only.
+- Do NOT reference spatial design, interior design, RIBA stages, CGI, guest journeys or stadium language.
+- This is a graphics and brand project. Write accordingly.
+
+{ctx}'''),
+
+    ('brief', 'Your brief',
+     '''Write the "Our understanding" section for this graphics/brand proposal.
+
+Two columns of prose (no bullets in left column, bullets allowed in right column).
+
+LEFT COLUMN — Summarise the brief in plain English:
+- What the client wants made (be specific: gift cards, brand identity, artwork, guidelines etc.)
+- The brand context — what repositioning, campaign or strategic moment this sits within
+- The emotional or commercial brief — what the work needs to achieve beyond just looking good
+- Any constraints named (brand guidelines to follow, technical specs, approvals process)
+
+RIGHT COLUMN — Space-by-space or piece-by-piece breakdown:
+- For each deliverable (card, sleeve, format, variant) give a brief note on its specific requirements
+- Flag anything that needs confirming with [CONFIRM WITH CLIENT: specific question]
+
+Rules:
+- No spatial language. No "guest journey", no "lounge", no "tier", no "hospitality".
+- This is a graphics and brand project. Use brand, design, artwork, print language throughout.
+- Never use "the club" — use "the brand" or "the organisation".
+- Use the exact names the brief uses for deliverables.
+
+{ctx}'''),
+
+    ('stage1', 'Phase 1 — Concept design',
+     '''Write Phase 1 — Concept design for this graphics/brand proposal.
+
+This phase covers initial creative direction: reviewing the brief and brand guidelines, developing
+concept routes, presenting options and getting a single direction signed off before any artwork begins.
+
+Structure with exactly these four labelled sections:
+
+Objective:
+[1-2 sentences: what Phase 1 achieves — a signed-off creative direction before production begins]
+
+Process:
+- Brief audit and brand review: review all brand guidelines, VBI, existing assets and any technical specs
+- Concept development: develop [2-3] distinct concept routes covering visual language, typography, colour approach and hierarchy
+- Internal review before presenting to client
+- Client presentation: present concept routes, gather feedback, agree a single direction
+- Direction sign-off: confirm the chosen direction in writing before Phase 2 begins
+
+Deliverables:
+- [number] concept routes presented as visual boards showing design language, typography, colour and tone
+- Written rationale for each route explaining how it meets the brief
+- Agreed and signed-off creative direction document
+- Any brand compliance notes flagged before production begins
+
+Meetings & Presentations:
+- Kick-off call at start of phase
+- Concept presentation to client team
+- Sign-off confirmation before Phase 2 commences
+- All documents issued via PDF
+
+Format rules: No markdown. No asterisks. No RIBA language. No spatial language. No CGI.
+Use "the brand" or "the organisation" not "the club".
+
+{ctx}'''),
+
+    ('stage456', 'Phase 2 — Artwork and delivery',
+     '''Write Phase 2 — Artwork and delivery for this graphics/brand proposal.
+
+This phase covers production of the final artwork: taking the approved concept through to
+print-ready or screen-ready files, including all technical checks, colour proofing and client sign-off.
+
+Structure with exactly these four labelled sections:
+
+Objective:
+[1-2 sentences: what Phase 2 achieves — client-approved, production-ready artwork files]
+
+Process:
+- Artwork preparation: produce all components simultaneously to maintain visual consistency
+- Work to confirmed physical dimensions, substrate specs or screen specs as required
+- Colour management: ensure colour palette holds correctly across all components and materials
+- Copy and content lock: confirm all copy, legal lines and variable data in writing before final file build
+- Pre-press review or technical check on all components before submission
+- File packaging and handover in agreed formats
+
+Deliverables:
+- Final artwork files for all components (list each one specifically from the brief)
+- Colour proofs for client written sign-off before production release
+- Copy-approved and locked text document
+- Pre-press checklist signed off internally
+- Final packaged files supplied in agreed format (AI, PDF, CMYK as required)
+- Print specification summary or technical handover document
+
+Meetings & Presentations:
+- Mid-phase review at artwork stage
+- Sign-off on colour proofs before release
+- File handover and production briefing
+- All documents issued via PDF
+
+Format rules: No markdown. No asterisks. No RIBA language. No spatial language. No CGI, no sample boards.
+Use print and artwork language throughout. Use "the brand" or "the organisation" not "the club".
+
+{ctx}'''),
+
+    ('fees', 'Fees and timings',
+     '''Write the fees and timings summary for this graphics/brand proposal.
+
+List the phases with realistic timings for a graphics/design project:
+- Phase 1 — Concept design: 2-3 weeks
+- Phase 2 — Artwork and delivery: 2-3 weeks
+
+Fees are [FEE: TBC] for all phases unless stated in the brief.
+Invoicing: 50% at start of each phase, 50% on completion.
+Note: fees are exclusive of VAT, third-party costs and print production.
+
+No markdown. No RIBA language.
+
+{ctx}'''),
+
+    ('nextsteps', 'Next steps',
+     '''Write next steps as four numbered actions for this graphics/brand proposal.
+Format each as: "Title: one sentence description."
+1. Review this proposal: ...
+2. Send us your feedback: ...
+3. Share brand assets: ask them to share brand guidelines, VBI or any existing assets we need before starting
+4. Confirm appointment: ...
+
+Keep titles under 5 words. Direct and confident. No client name. No spatial language.
+
+{ctx}'''),
+]
+
 
 def build_context(meta, spaces_text=''):
     bt = meta.get('brief_type','')
@@ -1615,46 +1768,52 @@ def run_generation(job_id):
 
     update_job(job_id, status='running')
     try:
-        ctx = build_context(meta, spaces_text)
-
         # ── RESEARCH ─────────────────────────────────────────────────────────
         progress('Researching the client...', 15)
-        time.sleep(12)
+        time.sleep(12)  # Let rate limit recover after extraction
 
         contact_str = meta.get('contact', '') or ''
         org_str = meta.get('client', '') or meta.get('venue', '') or ''
         if not contact_str and not org_str:
             update_job(job_id, intel={})
         else:
+            sector_str = meta.get('sector', '')
             research_prompt = (
-                f'Research {org_str} for a 20.20 Design Agency proposal. '
-                f'Find: recent news, current hospitality/venue/brand context, '
-                f'commercial pressures, relevant design or brand activity. '
-                f'Keep it brief — 3-5 bullet points, facts only. '
-                f'Sector context: {meta.get("sector", "")}. '
-                f'Client: {org_str}.'
+                f'Research {contact_str}{(" at " + org_str) if org_str else ""} for a design agency pitch. '
+                f'Organisation sector: {sector_str}. '
+                f'Find publicly available information about this person and organisation. '
+                'Return ONLY valid JSON:\n'
+                '{"contact_profile":"2-3 sentences about the person","org_context":"2-3 sentences on the organisation right now",'
+                '"why_now":"why this brief likely exists","ambitions":"their strategic goals","confidence":"high|medium|low"}'
             )
             try:
                 resp2 = client.messages.create(
                     model='claude-sonnet-4-6',
-                    max_tokens=400,
+                    max_tokens=800,
                     tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
                     messages=[{'role': 'user', 'content': research_prompt}]
                 )
-                intel_text = ' '.join(
-                    b.text for b in resp2.content if hasattr(b, 'text')
-                ).strip()
-                update_job(job_id, intel={'summary': intel_text})
+                txt2 = ' '.join(b.text for b in resp2.content if hasattr(b, 'text'))
+                m2 = re.search(r'\{[\s\S]*\}', txt2)
+                raw_intel = json.loads(m2.group(0)) if m2 else {}
+                clean_intel = {k: strip_html(v) if isinstance(v, str) else v for k, v in raw_intel.items()}
+                update_job(job_id, intel=clean_intel)
             except Exception:
                 update_job(job_id, intel={})
 
+        progress('Client research complete', 20)
+        ctx = build_context(meta, spaces_text)
+
         # ── SECTIONS ─────────────────────────────────────────────────────────
+        # Select the right template based on confirmed project type
+        pt = meta.get('project_type', 'hospitality')
+        active_sections = SECTIONS_GRAPHICS if pt in ('graphics_brand', 'other') else SECTIONS
         num_spaces = len(job.get('spaces_text', '').split('\n')) if job.get('spaces_text') else 0
         GAP = 14 if supporting_docs_count > 0 else 7
         sections = []
-        total = len(SECTIONS)
+        total = len(active_sections)
 
-        for i, (sid, label, prompt_tpl) in enumerate(SECTIONS):
+        for i, (sid, label, prompt_tpl) in enumerate(active_sections):
             pct = 20 + int((i / total) * 60)
             progress(f'Writing {label}...', pct)
 
@@ -1986,7 +2145,7 @@ textarea:focus{border-color:var(--nv)}
 
         <div>
           <label class="field-label">Scope of work</label>
-          <input type="text" id="rv-scope" class="t-sel" placeholder="Plain-English description of what's in scope">
+          <input type="text" id="rv-scope" class="t-sel" placeholder="Plain-English description of what's in scope" style="text-overflow:ellipsis">
         </div>
 
       </div>

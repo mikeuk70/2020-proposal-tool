@@ -952,7 +952,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
             msg_content = extract_prompt + '\n\nBrief:\n' + (brief_text or '')[:4000]
 
         resp = client.messages.create(
-            model='claude-sonnet-4-20250514',
+            model='claude-sonnet-4-6',
             max_tokens=1400,
             messages=[{'role': 'user', 'content': msg_content}]
         )
@@ -1045,7 +1045,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
             )
             try:
                 resp2 = client.messages.create(
-                    model='claude-sonnet-4-20250514',
+                    model='claude-sonnet-4-6',
                     max_tokens=800,
                     tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
                     messages=[{'role': 'user', 'content': research_prompt}]
@@ -1084,7 +1084,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work=''):
                         time.sleep(wait)
 
                     resp3 = client.messages.create(
-                        model='claude-sonnet-4-20250514',
+                        model='claude-sonnet-4-6',
                         max_tokens=800,
                         system=SYSTEM_PROMPT,
                         messages=[{'role': 'user', 'content': prompt}]

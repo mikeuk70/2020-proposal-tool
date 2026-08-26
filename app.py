@@ -990,6 +990,8 @@ def build_context(meta, spaces_text=''):
 
     ctx += f"RIBA STAGED PROJECT: {'YES — respond using RIBA stage structure and terminology' if is_riba_flag == 'yes' else 'NO — this is a phase-based or single-scope project, do not use RIBA stage references'}\n"
     ctx += f"CLIENT: {meta.get('client','')}\n"
+    if meta.get('sector'):
+        ctx += f"CLIENT SECTOR: {meta['sector']} — use language and terminology appropriate to this sector throughout. Never use sports club language for non-sports clients.\n"
     ctx += f"CONTACT: {contact_line}\n"
     if meta.get('lead_architect'): ctx += f"LEAD ARCHITECT/DESIGN TEAM: {meta['lead_architect']}\n"
     if meta.get('project_manager'): ctx += f"PROJECT MANAGER: {meta['project_manager']}\n"
@@ -1191,6 +1193,11 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
             '"client_question": "if confidence is medium or low, plain-language question — e.g. The '
             'brief mentions both Mattioli Woods and Leicester Tigers — which should we use as the client '
             'name? Leave empty string if confidence is high.",\n\n'
+            '"sector": "the industry or world the client operates in — a plain user-friendly label. '
+            'Examples: Professional football club, Coffee brand and retailer, Event catering company, '
+            'Cruise line, Property developer, Hospitality venue operator, Arena operator, Brand agency client. '
+            'NEVER use the word club for non-sports organisations. '
+            'NEVER default to sports or stadium language for brands, retailers or other sectors.",\n\n'
 
             '"venue": "",\n'
             '"primary_contact": "first name only if clear, otherwise full name — used in Dear [Name] greeting",\n'
@@ -1302,6 +1309,7 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
         meta = {
             'is_riba':               ex.get('is_riba', 'yes'),
             'client':                ex.get('client', ''),
+            'sector':                ex.get('sector', ''),
             'venue':                 ex.get('venue', ''),
             'contact':               ex.get('primary_contact', ''),
             'role':                  ex.get('contact_role', ''),
@@ -1416,6 +1424,16 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
             meta['prior_stages_completed'] = (meta.get('prior_stages_completed','') + ' ' + prior_work).strip()
 
         progress(f'Brief read — {meta["client"] or "client"} / {meta["venue"] or "project"}', 10)
+
+        # ── PAUSE FOR REVIEW ─────────────────────────────────────────────────
+        # Store everything needed for generation, then pause so the user can
+        # confirm the four key fields before writing starts. The /confirm
+        # endpoint resumes from here when the user clicks Generate.
+        update_job(job_id,
+                   status='awaiting_review',
+                   meta=meta,
+                   spaces_text=spaces_text)
+        return  # Thread ends here — /confirm will start a new thread
 
         # ── STEP 2: RESEARCH ─────────────────────────────────────────────────
         progress('Researching the client...', 15)
@@ -1578,6 +1596,141 @@ def run_pipeline(job_id, pdf_b64=None, brief_text=None, prior_work='', supportin
                 duration_seconds=round(time.time() - pipeline_start_ts, 1),
                 num_supporting_docs=len(supporting_docs_b64),
             )
+        progress(f'Error: {e}', None)
+
+
+def run_generation(job_id):
+    """Runs research → sections → PPTX for a job that has already completed
+    extraction and been confirmed via /confirm. Reads meta and spaces_text
+    from the saved job rather than re-running extraction."""
+    job = load_job(job_id) or {}
+    meta = job.get('meta', {})
+    spaces_text = job.get('spaces_text', meta.get('scope', 'Not listed'))
+    pipeline_start_ts = job.get('pipeline_start_ts', time.time())
+    supporting_docs_count = job.get('supporting_docs_b64_count', 0)
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+    def progress(msg, pct=None):
+        append_progress(job_id, msg, pct)
+
+    update_job(job_id, status='running')
+    try:
+        ctx = build_context(meta, spaces_text)
+
+        # ── RESEARCH ─────────────────────────────────────────────────────────
+        progress('Researching the client...', 15)
+        time.sleep(12)
+
+        contact_str = meta.get('contact', '') or ''
+        org_str = meta.get('client', '') or meta.get('venue', '') or ''
+        if not contact_str and not org_str:
+            update_job(job_id, intel={})
+        else:
+            research_prompt = (
+                f'Research {org_str} for a 20.20 Design Agency proposal. '
+                f'Find: recent news, current hospitality/venue/brand context, '
+                f'commercial pressures, relevant design or brand activity. '
+                f'Keep it brief — 3-5 bullet points, facts only. '
+                f'Sector context: {meta.get("sector", "")}. '
+                f'Client: {org_str}.'
+            )
+            try:
+                resp2 = client.messages.create(
+                    model='claude-sonnet-4-6',
+                    max_tokens=400,
+                    tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
+                    messages=[{'role': 'user', 'content': research_prompt}]
+                )
+                intel_text = ' '.join(
+                    b.text for b in resp2.content if hasattr(b, 'text')
+                ).strip()
+                update_job(job_id, intel={'summary': intel_text})
+            except Exception:
+                update_job(job_id, intel={})
+
+        # ── SECTIONS ─────────────────────────────────────────────────────────
+        num_spaces = len(job.get('spaces_text', '').split('\n')) if job.get('spaces_text') else 0
+        GAP = 14 if supporting_docs_count > 0 else 7
+        sections = []
+        total = len(SECTIONS)
+
+        for i, (sid, label, prompt_tpl) in enumerate(SECTIONS):
+            pct = 20 + int((i / total) * 60)
+            progress(f'Writing {label}...', pct)
+
+            is_stage = sid in ('stage1', 'stage2', 'stage3', 'stage456')
+            if is_stage and num_spaces >= 5:
+                section_max_tokens = 2400 if sid == 'stage456' else 1700
+            elif sid == 'stage456':
+                section_max_tokens = 1900
+            else:
+                section_max_tokens = 800
+
+            prompt = prompt_tpl.format(
+                contact=meta.get('contact', 'the contact'),
+                client=meta.get('client', 'the client'),
+                ctx=ctx
+            )
+
+            for attempt in range(4):
+                try:
+                    if attempt > 0:
+                        wait = [0, 35, 55, 80][attempt]
+                        progress(f'Rate limit — retrying {label} in {wait}s...', pct)
+                        time.sleep(wait)
+                    resp3 = client.messages.create(
+                        model='claude-sonnet-4-6',
+                        max_tokens=section_max_tokens,
+                        system=SYSTEM_PROMPT,
+                        messages=[{'role': 'user', 'content': prompt}]
+                    )
+                    sec = {'id': sid, 'heading': label, 'body': resp3.content[0].text.strip()}
+                    sections.append(sec)
+                    append_section(job_id, sec)
+                    break
+                except anthropic.RateLimitError:
+                    if attempt == 3:
+                        sec = {'id': sid, 'heading': label, 'body': '[Could not generate — add manually]'}
+                        sections.append(sec)
+                        append_section(job_id, sec)
+                except Exception as e:
+                    sec = {'id': sid, 'heading': label, 'body': f'[Error: {str(e)[:80]}]'}
+                    sections.append(sec)
+                    append_section(job_id, sec)
+                    break
+
+            if i < total - 1:
+                time.sleep(GAP)
+
+        update_job(job_id, sections=sections)
+        progress('All sections written', 85)
+
+        # ── BUILD PPTX ───────────────────────────────────────────────────────
+        progress('Building PowerPoint...', 88)
+        try:
+            import tempfile as tf
+            pptx_dir = tf.mkdtemp(prefix='2020_out_')
+            pptx_path = os.path.join(pptx_dir, 'proposal.pptx')
+            build_pptx_clean(sections, meta, pptx_path)
+            if not os.path.exists(pptx_path):
+                raise FileNotFoundError('PowerPoint was not created')
+            update_job(job_id, pptx_path=pptx_path, status='done')
+            progress('Done — click Download PowerPoint or Word Doc', 100)
+            log_usage_event(job_id, 'completed',
+                client=meta.get('client',''), venue=meta.get('venue',''),
+                brief_type=meta.get('brief_type',''), project_type=meta.get('project_type',''),
+                pptx_ready=True,
+                duration_seconds=round(time.time() - pipeline_start_ts, 1))
+        except Exception as pptx_err:
+            update_job(job_id, status='done', pptx_error=str(pptx_err))
+            progress(f'Sections complete. PowerPoint failed: {pptx_err}', 100)
+
+    except Exception as e:
+        job2 = load_job(job_id) or {}
+        if job2.get('sections'):
+            update_job(job_id, status='done', error=str(e))
+        else:
+            update_job(job_id, status='error', error=str(e))
         progress(f'Error: {e}', None)
 
 
@@ -1801,6 +1954,55 @@ textarea:focus{border-color:var(--nv)}
     </div>
   </div>
 
+  <!-- REVIEW PANEL — appears after extraction, before generation -->
+  <div class="panel hidden" id="panel-review">
+    <div class="panel-head">
+      <h2>Confirm before generating</h2>
+      <span class="step-badge">Check and correct if needed</span>
+    </div>
+    <div class="panel-body">
+      <div id="review-summary" style="padding:10px 14px;border-radius:6px;margin-bottom:1rem;font-size:13px;font-weight:500;background:#EAF3DE;border:1px solid #B7D89A;color:#3B6D11"></div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.25rem">
+
+        <div>
+          <label class="field-label">Project type</label>
+          <select id="rv-project-type" class="t-sel">
+            <option value="hospitality">Hospitality / Interior design</option>
+            <option value="graphics_brand">Graphics &amp; Brand</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="field-label">Client</label>
+          <input type="text" id="rv-client" class="t-sel" placeholder="Client name">
+        </div>
+
+        <div>
+          <label class="field-label">Sector</label>
+          <input type="text" id="rv-sector" class="t-sel" placeholder="e.g. Professional football club, Coffee brand">
+        </div>
+
+        <div>
+          <label class="field-label">Scope of work</label>
+          <input type="text" id="rv-scope" class="t-sel" placeholder="Plain-English description of what's in scope">
+        </div>
+
+      </div>
+
+      <div id="rv-other-row" style="display:none;margin-bottom:1rem">
+        <label class="field-label">Describe the project type</label>
+        <input type="text" id="rv-other-desc" class="t-sel" placeholder="e.g. Production artwork for gift cards, Wayfinding for cruise vessel">
+      </div>
+
+      <button class="btn btn-primary" id="review-btn" onclick="submitReview()">
+        Confirm and generate →
+      </button>
+      <span style="font-size:12px;color:var(--tx2);margin-left:1rem">Generation starts immediately.</span>
+    </div>
+  </div>
+
   <!-- TRIAGE NOTES -->
   <div class="panel hidden" id="panel-triage">
     <div class="panel-head"><h2>Triage</h2><span class="step-badge">Complete while generating</span></div>
@@ -1957,6 +2159,75 @@ function switchTab(t) {
   document.getElementById('tab-text').className = 'tab-btn ' + (t === 'text' ? 'active' : 'inactive');
 }
 
+// ── REVIEW PANEL ──────────────────────────────────────────────────────────
+function populateReviewPanel(data) {
+  var r = data.review || {};
+  var meta = data.meta || {};
+
+  // Summary strip
+  var summary = r.brief_summary || meta.brief_summary || 'Brief read — please confirm the details below before generating.';
+  document.getElementById('review-summary').textContent = '✓  ' + summary;
+
+  // Populate fields
+  var ptSel = document.getElementById('rv-project-type');
+  var pt = r.project_type || '';
+  var matchedPt = false;
+  for (var i = 0; i < ptSel.options.length; i++) {
+    if (ptSel.options[i].value === pt) { ptSel.selectedIndex = i; matchedPt = true; break; }
+  }
+  if (!matchedPt && pt) {
+    // Unknown type — show as Other with description
+    ptSel.value = 'other';
+    document.getElementById('rv-other-row').style.display = 'block';
+    document.getElementById('rv-other-desc').value = pt;
+  }
+
+  document.getElementById('rv-client').value = r.client || meta.client || '';
+  document.getElementById('rv-sector').value = r.sector || meta.sector || '';
+  document.getElementById('rv-scope').value  = r.scope_plain || meta.scope_plain || meta.scope || '';
+
+  // Show/hide other description on project type change
+  ptSel.onchange = function() {
+    document.getElementById('rv-other-row').style.display =
+      ptSel.value === 'other' ? 'block' : 'none';
+  };
+}
+
+async function submitReview() {
+  var btn = document.getElementById('review-btn');
+  btn.disabled = true;
+  btn.textContent = 'Starting generation…';
+
+  var ptVal = document.getElementById('rv-project-type').value;
+  if (ptVal === 'other') {
+    var desc = document.getElementById('rv-other-desc').value.trim();
+    ptVal = desc || 'other';
+  }
+
+  var payload = {
+    project_type: ptVal,
+    client:       document.getElementById('rv-client').value.trim(),
+    sector:       document.getElementById('rv-sector').value.trim(),
+    scope_plain:  document.getElementById('rv-scope').value.trim(),
+  };
+
+  try {
+    var resp = await fetch('/confirm/' + currentJobId, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    var data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    document.getElementById('panel-review').classList.add('hidden');
+    pollInterval = setInterval(pollStatus, 2000);
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = 'Confirm and generate →';
+    alert('Could not start generation: ' + e.message);
+  }
+}
+
 function togglePriorWork() {
   var chk = document.getElementById('prior-work-toggle');
   document.getElementById('prior-work-panel').style.display = chk.checked ? 'block' : 'none';
@@ -2061,6 +2332,15 @@ async function pollStatus() {
     if (data.sections && data.sections.length > 0) {
       document.getElementById('panel-sections').classList.remove('hidden');
       renderSections(data.sections);
+    }
+
+    // Review panel — shown after extraction, before generation starts
+    if (data.status === 'awaiting_review') {
+      clearInterval(pollInterval);
+      pollInterval = null;
+      populateReviewPanel(data);
+      document.getElementById('panel-review').classList.remove('hidden');
+      return;
     }
 
     // Store meta and reveal triage panel
@@ -2285,7 +2565,7 @@ function resetAll() {
   document.getElementById('submit-btn').disabled = false;
   document.getElementById('submit-btn').textContent = 'Generate proposal →';
   document.getElementById('nav-status').textContent = '';
-  ['panel-progress','panel-triage','panel-sections','panel-intel','panel-actions'].forEach(function(id) {
+  ['panel-progress','panel-review','panel-triage','panel-sections','panel-intel','panel-actions'].forEach(function(id) {
     document.getElementById(id).classList.add('hidden');
   });
   document.getElementById('submit-error').classList.add('hidden');
@@ -2490,6 +2770,40 @@ def submit():
 
     return jsonify({'job_id': job_id})
 
+
+@app.route('/confirm/<job_id>', methods=['POST'])
+def confirm(job_id):
+    """Accept the four confirmed review fields, merge into meta, start generation."""
+    job = load_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+
+    data = request.get_json() or {}
+    meta = job.get('meta', {})
+
+    # Merge confirmed values — only update fields that were sent
+    for field in ('project_type', 'client', 'sector', 'scope_plain'):
+        if field in data and data[field] is not None:
+            meta[field] = data[field]
+            if field == 'scope_plain':
+                meta['scope'] = data[field]
+
+    # Determine is_riba from confirmed project_type
+    pt = meta.get('project_type', '')
+    if pt and pt != 'hospitality':
+        meta['is_riba'] = 'no'
+
+    # Store pipeline start time if not already set
+    if not job.get('pipeline_start_ts'):
+        job['pipeline_start_ts'] = time.time()
+
+    update_job(job_id, meta=meta, status='running',
+               pipeline_start_ts=job.get('pipeline_start_ts', time.time()))
+
+    t = threading.Thread(target=run_generation, args=(job_id,), daemon=True)
+    t.start()
+    return jsonify({'ok': True})
+
 @app.route('/debug/<job_id>')
 def debug(job_id):
     """Shows full job state for troubleshooting."""
@@ -2513,15 +2827,24 @@ def status(job_id):
     job = load_job(job_id)
     if not job:
         return jsonify({'error': 'Job not found'}), 404
+    meta = job.get('meta', {})
     return jsonify({
-        'status':     job.get('status'),
-        'progress':   job.get('progress', []),
-        'sections':   job.get('sections', []),
-        'meta':       job.get('meta', {}),
-        'intel':      job.get('intel', {}),
-        'error':      job.get('error'),
-        'pptx_error': job.get('pptx_error'),
-        'pptx_ready': bool(job.get('pptx_path') and os.path.exists(job.get('pptx_path',''))),
+        'status':       job.get('status'),
+        'progress':     job.get('progress', []),
+        'sections':     job.get('sections', []),
+        'meta':         meta,
+        'intel':        job.get('intel', {}),
+        'error':        job.get('error'),
+        'pptx_error':   job.get('pptx_error'),
+        'pptx_ready':   bool(job.get('pptx_path') and os.path.exists(job.get('pptx_path',''))),
+        # Review panel fields — consumed when status is awaiting_review
+        'review': {
+            'project_type': meta.get('project_type', ''),
+            'client':       meta.get('client', ''),
+            'sector':       meta.get('sector', ''),
+            'scope_plain':  meta.get('scope_plain', meta.get('scope', '')),
+            'brief_summary': meta.get('brief_summary', ''),
+        }
     })
 
 @app.route('/rebuild', methods=['POST'])

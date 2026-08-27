@@ -1852,8 +1852,9 @@ def run_generation(job_id):
                         sec = {'id': sid, 'heading': label, 'body': '[Could not generate — add manually]'}
                         sections.append(sec)
                         append_section(job_id, sec)
+                    print(f'SECTION ERROR [{sid}]: {str(e)}', flush=True)
                 except Exception as e:
-                    sec = {'id': sid, 'heading': label, 'body': f'[Error: {str(e)[:80]}]'}
+                    sec = {'id': sid, 'heading': label, 'body': f'[Error: {str(e)}]'}
                     sections.append(sec)
                     append_section(job_id, sec)
                     break

@@ -2170,14 +2170,6 @@ textarea:focus{border-color:var(--nv)}
       <p style="font-size:12px;color:var(--tx2);margin-bottom:1rem">For internal use only — informs win likelihood score. Not sent to the AI.</p>
 
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;margin-bottom:.75rem">
-        <div><label class="field-label">Pursue this brief?</label>
-          <select id="t-pursue" class="t-sel" onchange="calcWin()">
-            <option value="">— select —</option>
-            <option value="3">Yes — full proposal</option>
-            <option value="2">Yes — credentials only</option>
-            <option value="1">Conditional</option>
-            <option value="0">No</option>
-          </select></div>
         <div><label class="field-label">Client status</label>
           <select id="t-client-status" class="t-sel" onchange="calcWin()">
             <option value="">— select —</option>
@@ -2202,6 +2194,14 @@ textarea:focus{border-color:var(--nv)}
             <option value="2">Good — scope clear, budget TBC</option>
             <option value="1">Outline — needs development</option>
             <option value="0">Vague — significant unknowns</option>
+          </select></div>
+        <div><label class="field-label">Strategic fit?</label>
+          <select id="t-fit" class="t-sel" onchange="calcWin()">
+            <option value="">— select —</option>
+            <option value="3">Core work — exactly our sector</option>
+            <option value="2">Adjacent — related sector</option>
+            <option value="1">Stretch — outside normal scope</option>
+            <option value="0">Poor fit — not our work</option>
           </select></div>
       </div>
 
@@ -2638,30 +2638,36 @@ function renderIntel(intel, meta) {
 })();
 
 function calcWin() {
-  var fields = ['t-pursue','t-client-status','t-competitive','t-brief-quality','t-resource','t-timescale'];
-  var total = 0; var filled = 0; var max = 13; // 3+3+3+3+2+2 = 16 max but pursue=0 exits
-  var pursue = document.getElementById('t-pursue');
-  if (pursue && pursue.value === '0') {
-    document.getElementById('win-score-value').textContent = 'Pass';
-    document.getElementById('win-score-label').textContent = 'Decision: do not pursue';
-    document.getElementById('win-score-bar').style.width = '0%';
-    document.getElementById('win-score-bar').style.background = '#E53935';
-    document.getElementById('win-score-panel').style.display = 'flex';
-    return;
-  }
+  var fields = ['t-client-status','t-competitive','t-brief-quality','t-fit','t-resource','t-timescale'];
+  // Max scores: client=3, competitive=3, brief=3, fit=3, resource=2, timescale=2 = 16 total
+  var max = 16;
+  var total = 0; var filled = 0;
   fields.forEach(function(id) {
     var el = document.getElementById(id);
     if (el && el.value !== '') { total += parseInt(el.value||0); filled++; }
   });
   if (filled < 2) { document.getElementById('win-score-panel').style.display = 'none'; return; }
-  var pct = Math.round((total / 16) * 100);
-  var label, colour;
-  if (pct >= 75)      { label = 'Strong — prioritise this one'; colour = '#43A047'; }
-  else if (pct >= 55) { label = 'Good — worth a full effort'; colour = '#C9A84C'; }
-  else if (pct >= 35) { label = 'Marginal — credentials only?'; colour = '#E97132'; }
-  else                { label = 'Low — consider declining'; colour = '#E53935'; }
+  var pct = Math.round((total / max) * 100);
+  var label, action, colour;
+  if (pct >= 75) {
+    label = 'Strong';
+    action = 'Prioritise — full proposal, senior team';
+    colour = '#43A047';
+  } else if (pct >= 55) {
+    label = 'Good';
+    action = 'Worth a full effort — proceed';
+    colour = '#C9A84C';
+  } else if (pct >= 35) {
+    label = 'Marginal';
+    action = 'Credentials or outline only — discuss with team';
+    colour = '#E97132';
+  } else {
+    label = 'Low';
+    action = 'Consider declining politely';
+    colour = '#E53935';
+  }
   document.getElementById('win-score-value').textContent = pct + '%';
-  document.getElementById('win-score-label').textContent = label;
+  document.getElementById('win-score-label').textContent = label + ' — ' + action;
   document.getElementById('win-score-bar').style.width = pct + '%';
   document.getElementById('win-score-bar').style.background = colour;
   document.getElementById('win-score-panel').style.display = 'flex';

@@ -907,6 +907,7 @@ Rules:
 - Short sentences. No em dashes. Direct tone.
 - The client name or venue name appears at most once.
 - Do NOT write generic agency positioning paragraphs about 20.20's methodology.
+- Do NOT reference internal observations, staff changes, competitor intelligence, budget commentary or anything flagged as internal notes. The cover letter is client-facing — only include what the client needs to read.
 - Use the specific language from the brief — if they named a programme or a deadline, reference it.
 - Timings must be realistic: Stage 2 = 4-6 weeks, Stage 3 = 6-8 weeks — not 1-2 weeks.
 
@@ -2140,6 +2141,11 @@ textarea:focus{border-color:var(--nv)}
         </div>
 
         <div>
+          <label class="field-label">Contact name <span style="font-weight:400;color:var(--tx2)">(cover letter)</span></label>
+          <input type="text" id="rv-contact" class="t-sel" placeholder="First name — appears in Hello [Name]">
+        </div>
+
+        <div>
           <label class="field-label">Sector</label>
           <input type="text" id="rv-sector" class="t-sel" placeholder="e.g. Professional football club, Coffee brand">
         </div>
@@ -2342,8 +2348,9 @@ function populateReviewPanel(data) {
     document.getElementById('rv-other-desc').value = pt;
   }
 
-  document.getElementById('rv-client').value = r.client || meta.client || '';
-  document.getElementById('rv-sector').value = r.sector || meta.sector || '';
+  document.getElementById('rv-client').value  = r.client  || meta.client  || '';
+  document.getElementById('rv-contact').value = r.contact || meta.contact || '';
+  document.getElementById('rv-sector').value  = r.sector  || meta.sector  || '';
   document.getElementById('rv-scope').value  = r.scope_plain || meta.scope_plain || meta.scope || '';
 
   // Show/hide other description on project type change
@@ -2367,6 +2374,7 @@ async function submitReview() {
   var payload = {
     project_type: ptVal,
     client:       document.getElementById('rv-client').value.trim(),
+    contact:      document.getElementById('rv-contact').value.trim(),
     sector:       document.getElementById('rv-sector').value.trim(),
     scope_plain:  document.getElementById('rv-scope').value.trim(),
   };
@@ -2948,7 +2956,7 @@ def confirm(job_id):
     meta = job.get('meta', {})
 
     # Merge confirmed values — only update fields that were sent
-    for field in ('project_type', 'client', 'sector', 'scope_plain'):
+    for field in ('project_type', 'client', 'contact', 'sector', 'scope_plain'):
         if field in data and data[field] is not None:
             meta[field] = data[field]
             if field == 'scope_plain':
@@ -3007,6 +3015,7 @@ def status(job_id):
         'review': {
             'project_type': meta.get('project_type', ''),
             'client':       meta.get('client', ''),
+            'contact':      meta.get('contact', ''),
             'sector':       meta.get('sector', ''),
             'scope_plain':  meta.get('scope_plain', meta.get('scope', '')),
             'brief_summary': meta.get('brief_summary', ''),

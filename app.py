@@ -124,7 +124,8 @@ def build_docx(sections, meta):
                 run = p.add_run(note); run.font.name = 'Arial'; run.font.size = Pt(11)
 
     tmp = tempfile.mkdtemp(prefix='2020_docx_')
-    slug = re.sub(r'[^a-zA-Z0-9]+', '_', meta.get('venue','Proposal'))
+    name_src = (meta.get('client') or meta.get('venue') or 'Proposal').split(',')[0].strip()
+    slug = re.sub(r'[^a-zA-Z0-9]+', '_', name_src).strip('_')[:40]
     path = os.path.join(tmp, f'{slug}_20.20_Proposal.docx')
     doc.save(path)
     return path
@@ -849,31 +850,30 @@ Objective:
 [1-2 sentences on what this stage achieves for THIS project — reference the specific venue, spaces or tiers]
 
 Process:
-[4-6 bullet points — how we work through this stage. Reference the specific spaces, tiers and design team context where relevant. If the project has multiple spaces or sub-stages (e.g. 3.1, 3.2, 3.3), summarise the sequence and grouping logic here in a few bullets — do not give each sub-stage its own bullet if that means Deliverables ends up empty.]
+[4-6 bullet points — how we work through this stage. For each step, briefly explain WHY 20.20 does it this way and what the benefit is to the client — not just what the action is. Reference the specific spaces, tiers and design team context where relevant. Do not give each sub-stage its own bullet if that means Deliverables ends up empty.]
 
 Deliverables:
-[6-10 bullet points — specific outputs, covering ALL spaces and sub-stages named in this stage, not just the ones mentioned in Process. If there are named spaces, reference them. If there is a per-tier delivery model, reflect it. Include the number of CGI renders if concept stage]
+[STRICT RULE: This is a CONCISE OUTPUT LIST only. Each bullet names one deliverable — a document, drawing, report, file or decision. Do NOT restate what happens in Process. Do NOT explain how deliverables are produced. Simply name what gets handed over at the end of this stage. If there are named spaces, list a deliverable for each. Keep each bullet to one short line. Maximum 8 bullets.]
 
 Meetings & Presentations:
-[3-5 bullet points — specific meetings with the design team, architect and client. Reference Teams or in-person based on what the brief says]
+[3-4 bullet points — name meetings specific to THIS project. Does the brief mention architect coordination, client workshops, site visits, or third-party sessions? Reflect those. Do not use a generic placeholder list.]
 
-CRITICAL — sub-stages and multi-space projects: when a stage covers multiple spaces or numbered sub-stages (e.g. Stage 3.1 through 3.6 across different lounges), do NOT spread the sub-stage walkthrough across Objective, Process and Deliverables as if each column holds a different slice of the sequence. Each of Objective, Process, Deliverables and Meetings must independently cover the FULL stage, every space and every sub-stage, just from that column's own angle (what it achieves / how we do it / what we produce / who we meet). A reader looking at only the Deliverables column should see outputs for every single space in this stage, not just some of them.
+CRITICAL: Each section must independently cover the full stage from its own angle. Do not spread content across columns.
 
-Quality requirements — these are mandatory:
+Quality requirements:
 
-1. RESPOND TO ALL KEY REQUIREMENTS: Every requirement and deliverable the client stated in the brief must be addressed in this stage section. Do not omit anything they asked for. If the brief specifies a particular output (e.g. fly-throughs, a specific report format, a named deliverable), it must appear in the Deliverables list.
+1. RESPOND TO ALL KEY REQUIREMENTS: Every requirement the client stated must be addressed. Named deliverables from the brief must appear in the Deliverables list.
 
-2. PROPORTIONATE RESPONSE: Give more detail on the things the brief emphasises. If the client spent a paragraph on bar positioning, address it properly. If they flagged a specific constraint, acknowledge it. Weight your response to match the importance placed on topics in the brief.
+2. PROPORTIONATE RESPONSE: Weight your response to match what the brief emphasises.
 
-3. USE THE CLIENT'S TERMINOLOGY: Use the exact words and phrases from the brief. If they call it "the James Herriot Restaurant", use that name — not "the restaurant". If they say "Bronze, Silver, Gold", use those exact tier names. If they refer to "the Demand and Revenue Assessment", use that phrase. Mirror their technical and factual language precisely. Then write in 20.20 tone of voice around it — confident, direct, commercially aware.
+3. USE THE CLIENT'S TERMINOLOGY: Use exact names and phrases from the brief. Then write in 20.20 tone — confident, direct, commercially aware.
 
-4. TIMINGS: Use realistic design timings. Stage 1 / Phase 1 = 2-3 weeks. Stage 2 / Phase 2 = 4-6 weeks. Stage 3 / Phase 3 = 6-8 weeks. Stage 4 / Phase 4 = 8-12 weeks. Stages 5-6 = programme dependent. Do not use 1-2 week timings — these are too short.
+4. TIMINGS: Phase 1 = 2-3 weeks. Phase 2 = 4-6 weeks. Phase 3 = 6-8 weeks. Phase 4 = 8-12 weeks.
 
 Format rules:
-- No markdown. No asterisks. No bold (**text**). No headers (#).
-- Write the four section labels as plain text on their own line followed by a colon.
-- The Meetings section must name specific meeting types and cadence — not a placeholder.
-- Use "the client", "the organisation", "the venue", or "the project" — not the client name, and never "the club" for non-sports clients.
+- No markdown. No asterisks. No bold. No headers.
+- Write section labels as plain text on their own line followed by a colon.
+- Use the client, the organisation, the venue, or the project — not the client name, never the club for non-sports clients.
 
 {ctx}"""
 
@@ -3056,7 +3056,8 @@ def download_docx(job_id):
         return 'No content yet', 400
     try:
         path = build_docx(sections, meta)
-        slug = re.sub(r'[^a-zA-Z0-9]+', '_', meta.get('venue', 'Proposal'))
+        name_src2 = (meta.get('client') or meta.get('venue') or 'Proposal').split(',')[0].strip()
+        slug = re.sub(r'[^a-zA-Z0-9]+', '_', name_src2).strip('_')[:40]
         return send_file(path, as_attachment=True,
                          download_name=f'{slug}_20.20_Proposal.docx',
                          mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
@@ -3076,8 +3077,15 @@ def download(job_id):
     if not os.path.exists(job['pptx_path']):
         return 'PowerPoint file missing — server may have restarted. Please generate again.', 404
 
-    venue = job.get('meta', {}).get('venue', 'Proposal').replace(' ', '_').replace("'", '').replace('&','and').replace('(','').replace(')','')
-    filename = f'{venue}_20.20_Proposal.pptx'
+    # Build a clean short filename — use client name if available, fall back
+    # to venue. Truncate to 40 chars so filenames like
+    # "Guinness_Storehouse_St_Jamess_Gate_Dublin_and_Guinness_Open..." don't happen.
+    meta = job.get('meta', {})
+    name_src = meta.get('client') or meta.get('venue') or 'Proposal'
+    # Take only the first meaningful part (before comma, dash or 'and')
+    name_src = re.split(r'[,\-]| and | And ', name_src)[0].strip()
+    slug = re.sub(r'[^a-zA-Z0-9]+', '_', name_src).strip('_')[:40]
+    filename = f'{slug}_20.20_Proposal.pptx'
 
     return send_file(
         job['pptx_path'],
